@@ -126,7 +126,11 @@ if ($page == 'pasien') {
             header("Location: dashboard.php?page=pasien&msg=saved"); exit();
         } catch (PDOException $e) { $error = $e->getMessage(); }
     }
-    $sql = "SELECT p.*, (SELECT COUNT(*) FROM TAGIHAN t WHERE t.ID_Pasien = p.ID_Pasien AND t.Status_Pembayaran = 'Belum Lunas') as tagihan_aktif FROM PASIEN p";
+    $sql = "SELECT p.*, 
+        (SELECT COUNT(*) FROM RAWAT_INAP ri 
+         WHERE ri.ID_Pasien = p.ID_Pasien 
+         AND ri.Tanggal_Keluar IS NULL) as sedang_dirawat
+            FROM PASIEN p";
     if (!empty($keyword)) { $sql .= " WHERE p.Nama ILIKE ? OR p.ID_Pasien ILIKE ?"; $stmt = $conn->prepare($sql); $stmt->execute(["%$keyword%", "%$keyword%"]); } else { $sql .= " ORDER BY p.ID_Pasien ASC"; $stmt = $conn->query($sql); }
     $data_pasien = $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
@@ -184,20 +188,68 @@ if ($page == 'dokter' || $page == 'perawat') {
     }
 }
 
-// --- 4. LOGIK RAWAT INAP (MODE MONITOR & CHECKOUT) ---
+// --- 4. LOGIK RAWAT INAP (MODE MONITOR & CHECKOUT + AUTO TAGIHAN) ---
 if ($page == 'rawat_inap') {
-    // 1. Proses Checkout (Pulangkan Pasien)
+    
+    // 1. PROSES CHECKOUT & HITUNG DUIT
     if ($action == 'checkout' && !empty($id_edit)) {
         try {
-            $tgl_keluar = date('Y-m-d'); // Hari ini
-            $stmt = $conn->prepare("UPDATE RAWAT_INAP SET Tanggal_Keluar = ? WHERE ID_Kamar = ?");
-            $stmt->execute([$tgl_keluar, $id_edit]);
-            header("Location: dashboard.php?page=rawat_inap&msg=checkout_sukses");
-            exit();
-        } catch (PDOException $e) { $error = "Gagal checkout: " . $e->getMessage(); }
+            $conn->beginTransaction();
+            $tgl_keluar = date('Y-m-d');
+
+            // A. Ambil Info Kamar & Cari Siapa Pasiennya (Lewat Tanggal Masuk Rekam Medis)
+            // Karena tabel RAWAT_INAP gak ada ID_Pasien, kita cari pasien yg rekam medisnya di tanggal masuk kamar tsb
+            $sql_cek = "SELECT r.*, l.Tarif_Dasar, l.ID_Layanan,
+                        (SELECT rm.ID_Pasien FROM REKAM_MEDIS rm WHERE rm.Tanggal_Catatan = r.Tanggal_Masuk LIMIT 1) as id_pasien_found
+                        FROM RAWAT_INAP r 
+                        JOIN LAYANAN l ON r.ID_Layanan = l.ID_Layanan 
+                        WHERE r.ID_Kamar = ?";
+            $stmt_cek = $conn->prepare($sql_cek);
+            $stmt_cek->execute([$id_edit]);
+            $data_inap = $stmt_cek->fetch(PDO::FETCH_ASSOC);
+
+            if ($data_inap && $data_inap['id_pasien_found']) {
+                // B. Hitung Lama Menginap
+                $masuk = new DateTime($data_inap['tanggal_masuk']);
+                $keluar = new DateTime($tgl_keluar);
+                $durasi = $keluar->diff($masuk)->days;
+                if ($durasi == 0) $durasi = 1; // Minimal bayar 1 hari
+
+                // C. Hitung Total Duit
+                $total_biaya = $durasi * $data_inap['tarif_dasar'];
+
+                // D. Update Kamar (Set Tanggal Keluar)
+                $stmt = $conn->prepare("UPDATE RAWAT_INAP SET Tanggal_Keluar = ? WHERE ID_Kamar = ?");
+                $stmt->execute([$tgl_keluar, $id_edit]);
+
+                // E. Bikin Tagihan Baru Otomatis (T-Random)
+                $id_tagihan_baru = 'T' . date('ymd') . rand(100, 999);
+                
+                // Insert ke Tabel TAGIHAN
+                $sql_bill = "INSERT INTO TAGIHAN (ID_Tagihan, ID_Pasien, Tanggal_Tagihan, Total_Biaya, Status_Pembayaran) VALUES (?, ?, ?, ?, 'Belum Lunas')";
+                $stmt_bill = $conn->prepare($sql_bill);
+                $stmt_bill->execute([$id_tagihan_baru, $data_inap['id_pasien_found'], $tgl_keluar, $total_biaya]);
+
+                // F. Insert Detail Tagihan (Opsional, biar rapi)
+                $sql_detail = "INSERT INTO DETAIL_TAGIHAN (ID_Tagihan, ID_Layanan, Jumlah, Subtotal) VALUES (?, ?, ?, ?)";
+                $stmt_detail = $conn->prepare($sql_detail);
+                $stmt_detail->execute([$id_tagihan_baru, $data_inap['id_layanan'], $durasi, $total_biaya]);
+
+                $conn->commit();
+                header("Location: dashboard.php?page=rawat_inap&msg=checkout_sukses");
+                exit();
+            } else {
+                // Kalau pasien gak ketemu (Data rekam medisnya gak sinkron tanggalnya)
+                throw new Exception("Data Pasien tidak ditemukan di Rekam Medis pada tanggal tersebut.");
+            }
+
+        } catch (Exception $e) { 
+            $conn->rollBack(); 
+            $error = "Gagal checkout: " . $e->getMessage(); 
+        }
     }
 
-    // 2. Proses Hapus Data (Kalau salah input)
+    // 2. Proses Hapus Data
     if ($action == 'delete' && !empty($id_edit)) {
         $stmt = $conn->prepare("DELETE FROM RAWAT_INAP WHERE ID_Kamar = ?");
         $stmt->execute([$id_edit]);
@@ -205,7 +257,7 @@ if ($page == 'rawat_inap') {
         exit();
     }
 
-    // 3. Ambil Data
+    // 3. Tampil Data (Monitor)
     $sql = "SELECT r.*, l.Nama_Layanan, 
             COALESCE(
                 (SELECT p.Nama FROM REKAM_MEDIS rm 

@@ -5,7 +5,7 @@ $host = "localhost";
 $port = "5432";
 $dbname = "proyek2"; // Pastikan ini sesuai nama database di DBeaver
 $user = "postgres";
-$password = "torajelek123"; // <-- ISI PASSWORDNYA JANGAN LUPA
+$password = "ayubifathan"; // <-- ISI PASSWORDNYA JANGAN LUPA
 
 try {
     // KITA WAJIB PAKAI "new PDO" (bukan pg_connect)
