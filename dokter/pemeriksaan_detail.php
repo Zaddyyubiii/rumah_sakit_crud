@@ -42,16 +42,42 @@ if (!$pem) {
 // Ambil daftar layanan untuk dropdown
 $daftar_layanan = $conn->query("SELECT id_layanan, nama_layanan FROM layanan ORDER BY nama_layanan")->fetchAll(PDO::FETCH_ASSOC);
 
+// Cek status rawat awal (berdasarkan layanan yg sudah ada, kalau ada)
+$sqlJR = "SELECT l.id_layanan, l.nama_layanan
+          FROM detail_pemeriksaan dp
+          JOIN layanan l ON l.id_layanan = dp.id_layanan
+          WHERE dp.id_pemeriksaan = ?
+          LIMIT 1";
+$stJR = $conn->prepare($sqlJR);
+$stJR->execute([$id_pem]);
+$rowJR = $stJR->fetch(PDO::FETCH_ASSOC);
+
+$jenis_rawat_awal = 'Rawat Jalan';
+if ($rowJR && (strpos(strtolower($rowJR['nama_layanan']), 'kamar rawat inap') !== false || $rowJR['id_layanan'] === 'L005')) {
+    $jenis_rawat_awal = 'Rawat Inap';
+}
+
 // Handle submit
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $id_layanan     = $_POST['id_layanan'] ?? '';
     $diagnosis      = trim($_POST['diagnosis'] ?? '');
     $konsultasi     = trim($_POST['konsultasi'] ?? '');
     $suntik_vitamin = trim($_POST['suntik_vitamin'] ?? '');
+    $jenis_rawat    = $_POST['jenis_rawat'] ?? 'Rawat Jalan';
 
     try {
+        if (!in_array($jenis_rawat, ['Rawat Jalan','Rawat Inap'], true)) {
+            $jenis_rawat = 'Rawat Jalan';
+        }
+
         if ($id_layanan === '' || $diagnosis === '' || $konsultasi === '') {
             throw new Exception("Layanan, diagnosis, dan hasil/konsultasi wajib diisi.");
+        }
+
+        // kalau dipilih Rawat Inap tapi layanan bukan layanan inap -> paksa ke L005 (Kamar Rawat Inap Kelas 1)
+        $LAYANAN_INAP_IDS = ['L005']; // nanti kalau ada layanan rawat inap lain bisa ditambah di sini
+        if ($jenis_rawat === 'Rawat Inap' && !in_array($id_layanan, $LAYANAN_INAP_IDS, true)) {
+            $id_layanan = 'L005';
         }
 
         // 1) UPSERT ke detail_pemeriksaan
@@ -66,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stDet = $conn->prepare($sqlDet);
         $stDet->execute([$id_layanan, $id_pem, $konsultasi, $suntik_vitamin]);
 
-        // 2) UPSERT ke rekam_medis
+        // 2) UPSERT ke rekam_medis (supaya rekam medis selalu ikut ke-update)
         $id_pasien   = $pem['id_pasien'];
         $tgl_catatan = $pem['tanggal_pemeriksaan'];
 
@@ -146,6 +172,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <?php endif; ?>
 
     <form method="post">
+        <div class="row">
+            <label>Jenis Perawatan</label>
+            <select name="jenis_rawat">
+                <option value="Rawat Jalan" <?= $jenis_rawat_awal === 'Rawat Jalan' ? 'selected' : '' ?>>Rawat Jalan</option>
+                <option value="Rawat Inap" <?= $jenis_rawat_awal === 'Rawat Inap' ? 'selected' : '' ?>>Rawat Inap</option>
+            </select>
+        </div>
+
         <div class="row">
             <label>Layanan</label>
             <select name="id_layanan">

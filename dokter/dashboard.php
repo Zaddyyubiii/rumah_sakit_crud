@@ -77,7 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $flash_success = "Jadwal pemeriksaan baru berhasil dibuat.";
         }
 
-        // Tambah / update Detail Pemeriksaan dari menu LAYANAN
+        // Tambah / update Detail Pemeriksaan dari menu LAYANAN (bukan dari Isi Hasil)
         if ($form_type === 'detail_pem_add') {
             $view = 'layanan';
 
@@ -141,6 +141,31 @@ if ($view === 'rekam_medis') {
     $stmt = $conn->prepare($sql);
     $stmt->execute([$id_tm]);
     $rekam_medis = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Tentukan status Rawat Jalan / Rawat Inap per rekam medis
+    foreach ($rekam_medis as &$rm) {
+        // Asumsi: ID Rekam Medis RMxxx berpasangan dengan ID Pemeriksaan PExxx
+        $num = preg_replace('/\D/', '', $rm['id_rekam_medis']);
+        $num = str_pad($num, 3, '0', STR_PAD_LEFT);
+        $id_pem = 'PE' . $num;
+        $rm['id_pemeriksaan'] = $id_pem;
+
+        $sqlJR = "SELECT l.id_layanan, l.nama_layanan
+                  FROM detail_pemeriksaan dp
+                  JOIN layanan l ON l.id_layanan = dp.id_layanan
+                  WHERE dp.id_pemeriksaan = ?
+                  LIMIT 1";
+        $stJR = $conn->prepare($sqlJR);
+        $stJR->execute([$id_pem]);
+        $rowJR = $stJR->fetch(PDO::FETCH_ASSOC);
+
+        if ($rowJR && (strpos(strtolower($rowJR['nama_layanan']), 'kamar rawat inap') !== false || $rowJR['id_layanan'] === 'L005')) {
+            $rm['jenis_rawat'] = 'Rawat Inap';
+        } else {
+            $rm['jenis_rawat'] = 'Rawat Jalan';
+        }
+    }
+    unset($rm);
 
     $sqlStat = "SELECT 
                     COUNT(*) AS total_rm,
@@ -384,6 +409,7 @@ if ($view === 'layanan') {
                             <th>Tanggal</th>
                             <th>Diagnosis</th>
                             <th>Hasil</th>
+                            <th>Jenis Rawat</th>
                             <th>Aksi</th>
                         </tr>
                         </thead>
@@ -395,10 +421,15 @@ if ($view === 'layanan') {
                                 <td><?= date('d-m-Y', strtotime($rm['tanggal_catatan'])) ?></td>
                                 <td><span style="color:#d32f2f; font-weight:500;"><?= htmlspecialchars($rm['diagnosis']) ?></span></td>
                                 <td><?= htmlspecialchars($rm['hasil_pemeriksaan']) ?></td>
+                                <td><?= htmlspecialchars($rm['jenis_rawat']) ?></td>
                                 <td>
-                                    <a class="btn-secondary" style="padding:3px 10px; font-size:11px;"
+                                    <a class="btn-secondary" style="padding:3px 10px; font-size:11px; margin-right:4px;"
                                        href="rekam_medis_edit.php?id=<?= urlencode($rm['id_rekam_medis']) ?>">
                                         Edit
+                                    </a>
+                                    <a class="btn-secondary" style="padding:3px 10px; font-size:11px;"
+                                       href="pemeriksaan_detail.php?id=<?= urlencode($rm['id_pemeriksaan']) ?>">
+                                        Rawat
                                     </a>
                                 </td>
                             </tr>

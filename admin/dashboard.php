@@ -90,11 +90,60 @@ if ($page == 'rekam_medis') {
         }
     }
     
-    $sql = "SELECT rm.*, p.Nama AS nama_pasien, tm.Nama_Tenaga_Medis AS nama_dokter,
-            (SELECT l.Nama_Layanan FROM TAGIHAN t JOIN DETAIL_TAGIHAN dt ON t.ID_Tagihan = dt.ID_Tagihan JOIN LAYANAN l ON dt.ID_Layanan = l.ID_Layanan WHERE t.ID_Pasien = p.ID_Pasien AND t.Status_Pembayaran = 'Belum Lunas' AND (l.Nama_Layanan ILIKE '%Inap%' OR l.Nama_Layanan ILIKE '%Kamar%') LIMIT 1) AS info_kamar
-            FROM REKAM_MEDIS rm 
-            JOIN PASIEN p ON rm.ID_Pasien = p.ID_Pasien 
-            JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis";
+        $sql = "
+    SELECT 
+        rm.*,
+        p.Nama AS nama_pasien,
+        tm.Nama_Tenaga_Medis AS nama_dokter,
+
+        -- info_kamar dipakai buat nentuin Rawat Inap / Rawat Jalan
+        COALESCE(
+            -- 1) PRIORITAS: layanan dari DETAIL_PEMERIKSAAN (yang diisi dokter)
+            (
+                SELECT l.Nama_Layanan
+                FROM DETAIL_PEMERIKSAAN dp
+                JOIN LAYANAN l ON l.ID_Layanan = dp.ID_Layanan
+                -- Asumsi: RMxxx berpasangan dengan PExxx (sama seperti di dashboard dokter)
+                WHERE dp.ID_Pemeriksaan = REPLACE(rm.ID_Rekam_Medis, 'RM', 'PE')
+                  AND (
+                        LOWER(l.Nama_Layanan) LIKE '%inap%' 
+                     OR LOWER(l.Nama_Layanan) LIKE '%kamar%'
+                     OR l.ID_Layanan = 'L005'      -- Kamar Rawat Inap Kelas 1
+                  )
+                LIMIT 1
+            ),
+
+            -- 2) Kalau belum ketemu, cek tabel RAWAT_INAP (kalau admin yang buat rawat inap)
+            (
+                SELECT l.Nama_Layanan
+                FROM RAWAT_INAP r
+                JOIN LAYANAN l ON l.ID_Layanan = r.ID_Layanan
+                -- Kamu sebelumnya pakai Tanggal_Catatan vs Tanggal_Masuk sebagai penghubung
+                WHERE r.Tanggal_Masuk = rm.Tanggal_Catatan
+                LIMIT 1
+            ),
+
+            -- 3) Terakhir, fallback ke logika lama: dari TAGIHAN yang belum lunas
+            (
+                SELECT l.Nama_Layanan 
+                FROM TAGIHAN t 
+                JOIN DETAIL_TAGIHAN dt ON t.ID_Tagihan = dt.ID_Tagihan 
+                JOIN LAYANAN l        ON dt.ID_Layanan = l.ID_Layanan 
+                WHERE t.ID_Pasien = p.ID_Pasien 
+                  AND t.Status_Pembayaran = 'Belum Lunas' 
+                  AND (
+                        LOWER(l.Nama_Layanan) LIKE '%inap%' 
+                     OR LOWER(l.Nama_Layanan) LIKE '%kamar%'
+                  )
+                LIMIT 1
+            )
+        ) AS info_kamar
+
+    FROM REKAM_MEDIS rm 
+    JOIN PASIEN       p  ON rm.ID_Pasien       = p.ID_Pasien 
+    JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis
+    ";
+
     if (!empty($keyword)) {
         $sql .= " WHERE p.Nama ILIKE ? OR rm.Diagnosis ILIKE ?";
         $sql .= " ORDER BY rm.Tanggal_Catatan DESC";
