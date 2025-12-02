@@ -13,31 +13,48 @@ if (!$id_tm) {
     die("<div style='padding:20px; color:red;'>Error: Akun Anda tidak terhubung dengan Data Tenaga Medis. Hubungi Admin.</div>");
 }
 
+// Helper: generate ID otomatis (P001, PE001, dst)
+function generateNextId(PDO $conn, string $table, string $column, string $prefix): string {
+    $sql  = "SELECT $column FROM $table WHERE $column LIKE ? ORDER BY $column DESC LIMIT 1";
+    $stmt = $conn->prepare($sql);
+    $stmt->execute([$prefix . '%']);
+    $last = $stmt->fetchColumn();
+
+    if (!$last) {
+        $num = 1;
+    } else {
+        $num = (int)preg_replace('/\D/', '', $last) + 1;
+    }
+
+    return $prefix . str_pad($num, 3, '0', STR_PAD_LEFT);
+}
+
 // View aktif (Default: rekam_medis)
 $view = $_GET['view'] ?? 'rekam_medis';
 
-// Untuk pesan sukses / error
 $flash_success = null;
 $flash_error   = null;
 
-// ==========================================================
-// 0. HANDLE FORM POST (Pasien, Pemeriksaan, Layanan dari menu Layanan)
-// ==========================================================
+// ===================================================================
+// HANDLE POST
+// ===================================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $form_type = $_POST['form_type'] ?? '';
 
     try {
-        // Tambah Pasien baru
+        // -----------------------------------------------------------
+        // Tambah Pasien Baru (ID otomatis)
+        // -----------------------------------------------------------
         if ($form_type === 'pasien_add') {
             $view = 'pasien';
 
-            $id_pasien      = trim($_POST['id_pasien'] ?? '');
+            $id_pasien      = generateNextId($conn, 'pasien', 'id_pasien', 'P');
             $nama           = trim($_POST['nama'] ?? '');
             $tanggal_lahir  = $_POST['tanggal_lahir'] ?? '';
             $alamat         = trim($_POST['alamat'] ?? '');
             $nomor_telepon  = trim($_POST['nomor_telepon'] ?? '');
 
-            if ($id_pasien === '' || $nama === '' || $tanggal_lahir === '' || $alamat === '' || $nomor_telepon === '') {
+            if ($nama === '' || $tanggal_lahir === '' || $alamat === '' || $nomor_telepon === '') {
                 throw new Exception("Semua field pasien wajib diisi.");
             }
 
@@ -46,20 +63,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt = $conn->prepare($sql);
             $stmt->execute([$id_pasien, $nama, $tanggal_lahir, $alamat, $nomor_telepon]);
 
-            $flash_success = "Pasien baru berhasil ditambahkan.";
+            $flash_success = "Pasien baru berhasil ditambahkan dengan ID $id_pasien.";
         }
 
-        // Tambah Jadwal Pemeriksaan
+        // -----------------------------------------------------------
+        // Tambah Jadwal Pemeriksaan (ID otomatis)
+        // -----------------------------------------------------------
         if ($form_type === 'pemeriksaan_add') {
             $view = 'pemeriksaan';
 
-            $id_pemeriksaan      = trim($_POST['id_pemeriksaan'] ?? '');
+            $id_pemeriksaan      = generateNextId($conn, 'pemeriksaan', 'id_pemeriksaan', 'PE');
             $id_pasien           = $_POST['id_pasien'] ?? '';
             $tanggal_pemeriksaan = $_POST['tanggal_pemeriksaan'] ?? '';
             $waktu_pemeriksaan   = $_POST['waktu_pemeriksaan'] ?? '';
             $ruang_pemeriksaan   = trim($_POST['ruang_pemeriksaan'] ?? '');
 
-            if ($id_pemeriksaan === '' || $id_pasien === '' || $tanggal_pemeriksaan === '' || $waktu_pemeriksaan === '' || $ruang_pemeriksaan === '') {
+            if ($id_pasien === '' || $tanggal_pemeriksaan === '' || $waktu_pemeriksaan === '' || $ruang_pemeriksaan === '') {
                 throw new Exception("Semua field jadwal pemeriksaan wajib diisi.");
             }
 
@@ -74,10 +93,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $tanggal_pemeriksaan, $waktu_pemeriksaan, $ruang_pemeriksaan
             ]);
 
-            $flash_success = "Jadwal pemeriksaan baru berhasil dibuat.";
+            $flash_success = "Jadwal pemeriksaan baru berhasil dibuat dengan ID $id_pemeriksaan.";
         }
 
-        // Tambah / update Detail Pemeriksaan dari menu LAYANAN (bukan dari Isi Hasil)
+        // -----------------------------------------------------------
+        // Tambah / Update Detail Pemeriksaan (Layanan lanjutan)
+        // -----------------------------------------------------------
         if ($form_type === 'detail_pem_add') {
             $view = 'layanan';
 
@@ -97,7 +118,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception("Pemeriksaan tidak ditemukan atau bukan milik Anda.");
             }
 
-            // UPSERT ke detail_pemeriksaan
             $sqlDet = "
                 INSERT INTO detail_pemeriksaan (id_layanan, id_pemeriksaan, konsultasi, suntik_vitamin)
                 VALUES (?, ?, ?, ?)
@@ -112,6 +132,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $flash_success = "Layanan lanjutan berhasil disimpan untuk pemeriksaan tersebut.";
         }
 
+        // -----------------------------------------------------------
+        // Update Jenis Rawat dari Rekam Medis (dropdown)
+        //   -> SEKARANG LANGSUNG KE TABEL RAWAT_INAP
+        // -----------------------------------------------------------
+        if ($form_type === 'rm_update_rawat') {
+            $view = 'rekam_medis';
+
+            $id_rm       = $_POST['id_rekam_medis'] ?? '';
+            $jenis_rawat = $_POST['jenis_rawat'] ?? 'Rawat Jalan';
+
+            if ($id_rm === '') {
+                throw new Exception("ID Rekam Medis tidak valid.");
+            }
+            if (!in_array($jenis_rawat, ['Rawat Jalan', 'Rawat Inap'], true)) {
+                $jenis_rawat = 'Rawat Jalan';
+            }
+
+            // Ambil data rekam medis (id_pasien & tanggal)
+            $stRm = $conn->prepare("
+                SELECT id_pasien, tanggal_catatan 
+                FROM rekam_medis 
+                WHERE id_rekam_medis = ? AND id_tenaga_medis = ?
+            ");
+            $stRm->execute([$id_rm, $id_tm]);
+            $rmRow = $stRm->fetch(PDO::FETCH_ASSOC);
+
+            if (!$rmRow) {
+                throw new Exception("Rekam medis tidak ditemukan atau bukan milik Anda.");
+            }
+
+            $id_pasien = $rmRow['id_pasien'];
+            $tgl       = $rmRow['tanggal_catatan'];
+
+            if ($jenis_rawat === 'Rawat Inap') {
+                // Cari ID layanan kamar rawat inap
+                $id_layanan_inap = $conn->query("
+                    SELECT id_layanan 
+                    FROM layanan 
+                    WHERE nama_layanan ILIKE '%rawat inap%' 
+                    LIMIT 1
+                ")->fetchColumn();
+                if (!$id_layanan_inap) {
+                    $id_layanan_inap = 'L005'; // fallback
+                }
+
+                // Cek apakah sudah ada rawat inap aktif untuk pasien & tanggal ini
+                $cek = $conn->prepare("
+                    SELECT id_kamar 
+                    FROM rawat_inap 
+                    WHERE id_pasien = ? 
+                      AND tanggal_masuk = ? 
+                      AND tanggal_keluar IS NULL
+                    LIMIT 1
+                ");
+                $cek->execute([$id_pasien, $tgl]);
+                $id_kamar = $cek->fetchColumn();
+
+                if (!$id_kamar) {
+                    // Buat ID kamar baru (K001, K002, ...)
+                    $id_kamar = generateNextId($conn, 'rawat_inap', 'id_kamar', 'K');
+                    $ins = $conn->prepare("
+                        INSERT INTO rawat_inap (id_kamar, id_layanan, id_pasien, tanggal_masuk, tanggal_keluar)
+                        VALUES (?, ?, ?, ?, NULL)
+                    ");
+                    $ins->execute([$id_kamar, $id_layanan_inap, $id_pasien, $tgl]);
+                }
+
+                $flash_success = "Status diubah menjadi Rawat Inap.";
+            } else {
+                // Rawat Jalan: set tanggal_keluar kalau masih NULL
+                $upd = $conn->prepare("
+                    UPDATE rawat_inap 
+                    SET tanggal_keluar = COALESCE(tanggal_keluar, CURRENT_DATE)
+                    WHERE id_pasien = ?
+                      AND tanggal_masuk = ?
+                      AND tanggal_keluar IS NULL
+                ");
+                $upd->execute([$id_pasien, $tgl]);
+
+                $flash_success = "Status diubah menjadi Rawat Jalan.";
+            }
+
+            header("Location: dashboard.php?view=rekam_medis");
+            exit;
+        }
+
     } catch (Exception $e) {
         $flash_error = $e->getMessage();
     } catch (PDOException $e) {
@@ -119,9 +225,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// ==========================================================
-// 1. LOGIK REKAM MEDIS (view = rekam_medis)
-// ==========================================================
+// ===================================================================
+// 1. REKAM MEDIS
+// ===================================================================
 $rekam_medis = [];
 $stat_rm = ['total_rm' => 0, 'total_pasien_rm' => 0];
 
@@ -142,28 +248,18 @@ if ($view === 'rekam_medis') {
     $stmt->execute([$id_tm]);
     $rekam_medis = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // Tentukan status Rawat Jalan / Rawat Inap per rekam medis
+    // Jenis rawat -> cek ke RAWAT_INAP
     foreach ($rekam_medis as &$rm) {
-        // Asumsi: ID Rekam Medis RMxxx berpasangan dengan ID Pemeriksaan PExxx
-        $num = preg_replace('/\D/', '', $rm['id_rekam_medis']);
-        $num = str_pad($num, 3, '0', STR_PAD_LEFT);
-        $id_pem = 'PE' . $num;
-        $rm['id_pemeriksaan'] = $id_pem;
-
-        $sqlJR = "SELECT l.id_layanan, l.nama_layanan
-                  FROM detail_pemeriksaan dp
-                  JOIN layanan l ON l.id_layanan = dp.id_layanan
-                  WHERE dp.id_pemeriksaan = ?
-                  LIMIT 1";
-        $stJR = $conn->prepare($sqlJR);
-        $stJR->execute([$id_pem]);
-        $rowJR = $stJR->fetch(PDO::FETCH_ASSOC);
-
-        if ($rowJR && (strpos(strtolower($rowJR['nama_layanan']), 'kamar rawat inap') !== false || $rowJR['id_layanan'] === 'L005')) {
-            $rm['jenis_rawat'] = 'Rawat Inap';
-        } else {
-            $rm['jenis_rawat'] = 'Rawat Jalan';
-        }
+        $cek = $conn->prepare("
+            SELECT 1 
+            FROM rawat_inap 
+            WHERE id_pasien = ? 
+              AND tanggal_masuk = ? 
+              AND tanggal_keluar IS NULL
+            LIMIT 1
+        ");
+        $cek->execute([$rm['id_pasien'], $rm['tanggal_catatan']]);
+        $rm['jenis_rawat'] = $cek->fetchColumn() ? 'Rawat Inap' : 'Rawat Jalan';
     }
     unset($rm);
 
@@ -177,9 +273,9 @@ if ($view === 'rekam_medis') {
     $stat_rm = $stmtStat->fetch(PDO::FETCH_ASSOC);
 }
 
-// ==========================================================
-// 2. LOGIK PASIEN (view = pasien)
-// ==========================================================
+// ===================================================================
+// 2. PASIEN
+// ===================================================================
 $pasien = [];
 $stat_pasien = ['total_pasien' => 0];
 
@@ -200,9 +296,9 @@ if ($view === 'pasien') {
     $stat_pasien['total_pasien'] = count($pasien);
 }
 
-// ==========================================================
-// 3. LOGIK PEMERIKSAAN (view = pemeriksaan)
-// ==========================================================
+// ===================================================================
+// 3. PEMERIKSAAN
+// ===================================================================
 $pemeriksaan = [];
 $stat_pem = ['total_pem' => 0];
 $daftar_pasien_all = [];
@@ -231,20 +327,21 @@ if ($view === 'pemeriksaan') {
 
     $stat_pem['total_pem'] = count($pemeriksaan);
 
-    // Pasien untuk dropdown
     $daftar_pasien_all = $conn->query("SELECT id_pasien, nama FROM pasien ORDER BY nama")->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// ==========================================================
-// 4. LOGIK LAYANAN (view = layanan)
-// ==========================================================
+// ===================================================================
+// 4. LAYANAN
+// ===================================================================
 $layanan = [];
 $stat_layanan = ['total_jenis' => 0, 'total_pem_layanan' => 0];
 $daftar_layanan_all_l = [];
 $daftar_pemeriksaan_dokter = [];
+$detail_layanan = [];
 
 if ($view === 'layanan') {
 
+    // Ringkasan layanan (per ID layanan)
     $sql = "SELECT 
                 l.id_layanan,
                 l.nama_layanan,
@@ -264,16 +361,20 @@ if ($view === 'layanan') {
     $layanan = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $stat_layanan['total_jenis'] = count($layanan);
-
     $totalPem = 0;
     foreach ($layanan as $row) {
         $totalPem += (int)$row['jumlah_pemeriksaan'];
     }
     $stat_layanan['total_pem_layanan'] = $totalPem;
 
-    // Untuk form tambah layanan lanjutan
-    $daftar_layanan_all_l = $conn->query("SELECT id_layanan, nama_layanan FROM layanan ORDER BY nama_layanan")->fetchAll(PDO::FETCH_ASSOC);
+    // Dropdown semua layanan
+    $daftar_layanan_all_l = $conn->query("
+        SELECT id_layanan, nama_layanan 
+        FROM layanan 
+        ORDER BY nama_layanan
+    ")->fetchAll(PDO::FETCH_ASSOC);
 
+    // Dropdown semua pemeriksaan milik dokter ini
     $sqlPer = "SELECT 
                     pe.id_pemeriksaan,
                     p.nama AS nama_pasien,
@@ -285,9 +386,26 @@ if ($view === 'layanan') {
     $stPer = $conn->prepare($sqlPer);
     $stPer->execute([$id_tm]);
     $daftar_pemeriksaan_dokter = $stPer->fetchAll(PDO::FETCH_ASSOC);
+
+    // Detail layanan per pasien
+    $sqlDetail = "SELECT 
+                        pe.id_pemeriksaan,
+                        p.nama AS nama_pasien,
+                        pe.tanggal_pemeriksaan,
+                        l.nama_layanan,
+                        dp.konsultasi,
+                        dp.suntik_vitamin
+                  FROM detail_pemeriksaan dp
+                  JOIN pemeriksaan pe ON dp.id_pemeriksaan = pe.id_pemeriksaan
+                  JOIN pasien p       ON pe.id_pasien = p.id_pasien
+                  JOIN layanan l      ON dp.id_layanan = l.id_layanan
+                  WHERE pe.id_tenaga_medis = ?
+                  ORDER BY pe.tanggal_pemeriksaan DESC, p.nama";
+    $stDet = $conn->prepare($sqlDetail);
+    $stDet->execute([$id_tm]);
+    $detail_layanan = $stDet->fetchAll(PDO::FETCH_ASSOC);
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -321,11 +439,26 @@ if ($view === 'layanan') {
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
         .section-header h2 { margin: 0; font-size: 17px; }
         
-        .btn-primary, .btn-secondary { border-radius: 999px; padding: 6px 14px; font-size: 13px; border: none; cursor: pointer; text-decoration: none; display:inline-block;}
+        .btn-primary, .btn-secondary, .btn-outline {
+            border-radius: 999px;
+            padding: 6px 14px;
+            font-size: 13px;
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            display:inline-block;
+        }
         .btn-primary { background: #1976d2; color: white; }
         .btn-primary:hover { background: #1258a3; }
         .btn-secondary { background:#eceff1; color:#37474f; }
         .btn-secondary:hover { background:#d7dde2; }
+        .btn-outline {
+            background: transparent;
+            color:#1976d2;
+            border:1px solid #1976d2;
+        }
+        .btn-outline:hover { background:#e3f2fd; }
+        .btn-xs { padding: 3px 10px; font-size: 11px; }
 
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th, td { padding: 8px 6px; border-bottom: 1px solid #eceff1; text-align: left; }
@@ -348,6 +481,23 @@ if ($view === 'layanan') {
             border-radius:6px; border:1px solid #cfd8dc;
         }
         textarea { resize: vertical; min-height:60px; }
+
+        /* Dropdown Jenis Rawat (pill hijau/merah) */
+        .rawat-select {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid #cfd8dc;
+            cursor: pointer;
+        }
+        .rawat-select.jalan {
+            background:#e8f5e9;
+            color:#2e7d32;
+        }
+        .rawat-select.inap {
+            background:#ffebee;
+            color:#c62828;
+        }
     </style>
 </head>
 <body>
@@ -374,7 +524,9 @@ if ($view === 'layanan') {
         <?php endif; ?>
 
         <?php if ($view === 'rekam_medis'): ?>
-            <!-- REKAM MEDIS -->
+            <!-- ==========================================
+                 REKAM MEDIS
+             ========================================== -->
             <div class="content-header">
                 <h1>Rekam Medis</h1>
                 <span>Data riwayat kesehatan pasien yang Anda tangani.</span>
@@ -421,15 +573,25 @@ if ($view === 'layanan') {
                                 <td><?= date('d-m-Y', strtotime($rm['tanggal_catatan'])) ?></td>
                                 <td><span style="color:#d32f2f; font-weight:500;"><?= htmlspecialchars($rm['diagnosis']) ?></span></td>
                                 <td><?= htmlspecialchars($rm['hasil_pemeriksaan']) ?></td>
-                                <td><?= htmlspecialchars($rm['jenis_rawat']) ?></td>
                                 <td>
-                                    <a class="btn-secondary" style="padding:3px 10px; font-size:11px; margin-right:4px;"
+                                    <?php
+                                        $classRawat = $rm['jenis_rawat'] === 'Rawat Inap'
+                                            ? 'rawat-select inap'
+                                            : 'rawat-select jalan';
+                                    ?>
+                                    <form method="post" style="display:inline;">
+                                        <input type="hidden" name="form_type" value="rm_update_rawat">
+                                        <input type="hidden" name="id_rekam_medis" value="<?= htmlspecialchars($rm['id_rekam_medis']) ?>">
+                                        <select name="jenis_rawat" class="<?= $classRawat ?>" onchange="this.form.submit()">
+                                            <option value="Rawat Jalan" <?= $rm['jenis_rawat']==='Rawat Jalan' ? 'selected' : '' ?>>Rawat Jalan</option>
+                                            <option value="Rawat Inap"  <?= $rm['jenis_rawat']==='Rawat Inap'  ? 'selected' : '' ?>>Rawat Inap</option>
+                                        </select>
+                                    </form>
+                                </td>
+                                <td>
+                                    <a class="btn-secondary btn-xs"
                                        href="rekam_medis_edit.php?id=<?= urlencode($rm['id_rekam_medis']) ?>">
                                         Edit
-                                    </a>
-                                    <a class="btn-secondary" style="padding:3px 10px; font-size:11px;"
-                                       href="pemeriksaan_detail.php?id=<?= urlencode($rm['id_pemeriksaan']) ?>">
-                                        Rawat
                                     </a>
                                 </td>
                             </tr>
@@ -440,7 +602,9 @@ if ($view === 'layanan') {
             </div>
 
         <?php elseif ($view === 'pasien'): ?>
-            <!-- PASIEN -->
+            <!-- ==========================================
+                 PASIEN
+             ========================================== -->
             <div class="content-header">
                 <h1>Pasien Saya</h1>
                 <span>Daftar pasien di sistem.</span>
@@ -456,40 +620,43 @@ if ($view === 'layanan') {
 
             <div class="section">
                 <div class="section-header">
-                    <h2>Tambah Pasien Baru</h2>
+                    <h2>Pasien</h2>
+                    <button class="btn-outline" type="button" onclick="togglePasienForm()">
+                        + Tambah Pasien Baru
+                    </button>
                 </div>
-                <form method="post">
-                    <input type="hidden" name="form_type" value="pasien_add">
-                    <div class="form-grid">
-                        <div>
-                            <label>ID Pasien</label>
-                            <input type="text" name="id_pasien" placeholder="Misal: P011">
-                        </div>
-                        <div>
-                            <label>Nama Lengkap</label>
-                            <input type="text" name="nama">
-                        </div>
-                        <div>
-                            <label>Tanggal Lahir</label>
-                            <input type="date" name="tanggal_lahir">
-                        </div>
-                        <div>
-                            <label>No. Telepon</label>
-                            <input type="text" name="nomor_telepon">
-                        </div>
-                    </div>
-                    <div class="form-grid">
-                        <div style="grid-column: 1 / -1;">
-                            <label>Alamat</label>
-                            <input type="text" name="alamat">
-                        </div>
-                    </div>
-                    <button type="submit" class="btn-primary">Simpan Pasien</button>
-                </form>
-            </div>
 
-            <div class="section">
-                <div class="section-header">
+                <div id="form-pasien" style="display:none; margin-bottom:16px;">
+                    <form method="post">
+                        <input type="hidden" name="form_type" value="pasien_add">
+                        <div class="form-grid">
+                            <div>
+                                <label>Nama Lengkap</label>
+                                <input type="text" name="nama">
+                            </div>
+                            <div>
+                                <label>Tanggal Lahir</label>
+                                <input type="date" name="tanggal_lahir">
+                            </div>
+                            <div>
+                                <label>No. Telepon</label>
+                                <input type="text" name="nomor_telepon">
+                            </div>
+                        </div>
+                        <div class="form-grid">
+                            <div style="grid-column: 1 / -1;">
+                                <label>Alamat</label>
+                                <input type="text" name="alamat">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn-primary">Simpan Pasien</button>
+                        <span style="font-size:11px; color:#90a4ae; margin-left:8px;">
+                            ID pasien akan dibuat otomatis (P001, P002, ...).
+                        </span>
+                    </form>
+                </div>
+
+                <div class="section-header" style="margin-top:8px; margin-bottom:8px;">
                     <h2>Data Pasien</h2>
                 </div>
                 <?php if (count($pasien) === 0): ?>
@@ -521,7 +688,9 @@ if ($view === 'layanan') {
             </div>
 
         <?php elseif ($view === 'pemeriksaan'): ?>
-            <!-- PEMERIKSAAN -->
+            <!-- ==========================================
+                 PEMERIKSAAN
+             ========================================== -->
             <div class="content-header">
                 <h1>Jadwal Pemeriksaan</h1>
                 <span>Daftar pemeriksaan fisik yang dijadwalkan dan hasilnya.</span>
@@ -545,7 +714,7 @@ if ($view === 'layanan') {
                     <div class="form-grid">
                         <div>
                             <label>ID Pemeriksaan</label>
-                            <input type="text" name="id_pemeriksaan" placeholder="Misal: PE011">
+                            <input type="text" placeholder="Otomatis (PExxx)" disabled>
                         </div>
                         <div>
                             <label>Pasien</label>
@@ -572,6 +741,9 @@ if ($view === 'layanan') {
                         </div>
                     </div>
                     <button type="submit" class="btn-primary">Simpan Jadwal</button>
+                    <span style="font-size:11px; color:#90a4ae; margin-left:8px;">
+                        ID pemeriksaan akan dibuat otomatis (PE001, PE002, ...).
+                    </span>
                 </form>
             </div>
 
@@ -610,7 +782,7 @@ if ($view === 'layanan') {
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <a class="btn-primary" style="padding:3px 10px; font-size:11px;"
+                                    <a class="btn-primary btn-xs"
                                        href="pemeriksaan_detail.php?id=<?= urlencode($pe['id_pemeriksaan']) ?>">
                                         Isi Hasil / Layanan
                                     </a>
@@ -623,7 +795,9 @@ if ($view === 'layanan') {
             </div>
 
         <?php elseif ($view === 'layanan'): ?>
-            <!-- LAYANAN -->
+            <!-- ==========================================
+                 LAYANAN
+             ========================================== -->
             <div class="content-header">
                 <h1>Layanan</h1>
                 <span>Daftar layanan medis yang pernah Anda gunakan, dan penambahan layanan lanjutan.</span>
@@ -721,8 +895,54 @@ if ($view === 'layanan') {
                     </table>
                 <?php endif; ?>
             </div>
+
+            <div class="section">
+                <div class="section-header">
+                    <h2>Daftar Layanan per Pasien</h2>
+                </div>
+
+                <?php if (count($detail_layanan) === 0): ?>
+                    <div class="empty">
+                        Belum ada layanan lanjutan yang diinputkan untuk pemeriksaan Anda.
+                    </div>
+                <?php else: ?>
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>ID Pemeriksaan</th>
+                            <th>Pasien</th>
+                            <th>Tanggal</th>
+                            <th>Layanan</th>
+                            <th>Konsultasi</th>
+                            <th>Suntik Vitamin</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($detail_layanan as $dl): ?>
+                            <tr>
+                                <td><?= htmlspecialchars($dl['id_pemeriksaan']) ?></td>
+                                <td><b><?= htmlspecialchars($dl['nama_pasien']) ?></b></td>
+                                <td><?= date('d-m-Y', strtotime($dl['tanggal_pemeriksaan'])) ?></td>
+                                <td><?= htmlspecialchars($dl['nama_layanan']) ?></td>
+                                <td><?= htmlspecialchars($dl['konsultasi']) ?></td>
+                                <td><?= htmlspecialchars($dl['suntik_vitamin']) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
+            </div>
+
         <?php endif; ?>
     </main>
 </div>
+
+<script>
+    function togglePasienForm(){
+        const box = document.getElementById('form-pasien');
+        if(!box) return;
+        box.style.display = (box.style.display === 'none' || box.style.display === '') ? 'block' : 'none';
+    }
+</script>
 </body>
 </html>

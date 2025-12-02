@@ -120,12 +120,19 @@ if ($page == 'rekam_medis') {
     }
     
     $sql = "SELECT rm.*, p.Nama AS nama_pasien, tm.Nama_Tenaga_Medis AS nama_dokter,
-            (SELECT l.Nama_Layanan FROM RAWAT_INAP ri 
-             JOIN LAYANAN l ON ri.ID_Layanan = l.ID_Layanan 
-             WHERE ri.ID_Pasien = rm.ID_Pasien AND ri.Tanggal_Masuk = rm.Tanggal_Catatan LIMIT 1) AS info_kamar
-            FROM REKAM_MEDIS rm 
-            JOIN PASIEN p ON rm.ID_Pasien = p.ID_Pasien 
-            JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis";
+        (
+            SELECT l.Nama_Layanan
+            FROM RAWAT_INAP ri 
+            JOIN LAYANAN l ON ri.ID_Layanan = l.ID_Layanan 
+            WHERE ri.ID_Pasien = rm.ID_Pasien 
+              AND ri.Tanggal_Masuk = rm.Tanggal_Catatan
+              AND ri.Tanggal_Keluar IS NULL     -- ✅ HANYA YANG MASIH DIRAWAT
+            LIMIT 1
+        ) AS info_kamar
+        FROM REKAM_MEDIS rm 
+        JOIN PASIEN p ON rm.ID_Pasien = p.ID_Pasien 
+        JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis";
+
 
     if (!empty($keyword)) {
         $sql .= " WHERE p.Nama ILIKE ? OR rm.Diagnosis ILIKE ?";
