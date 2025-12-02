@@ -38,17 +38,33 @@ $data_edit = null;
 // --- LOGIK DELETE GLOBAL ---
 if ($action == 'delete' && !empty($id_edit)) {
     try {
-        if ($page == 'pasien') $stmt = $conn->prepare("DELETE FROM PASIEN WHERE ID_Pasien = ?");
+        $conn->beginTransaction(); // Pakai transaksi biar aman
+        
+        if ($page == 'pasien') {
+            // Hapus anak-anaknya dulu manual (Jaga-jaga kalau DB belum cascade)
+            $conn->prepare("DELETE FROM TAGIHAN WHERE ID_Pasien = ?")->execute([$id_edit]);
+            $conn->prepare("DELETE FROM REKAM_MEDIS WHERE ID_Pasien = ?")->execute([$id_edit]);
+            $conn->prepare("DELETE FROM RAWAT_INAP WHERE ID_Pasien = ?")->execute([$id_edit]);
+            $conn->prepare("DELETE FROM PEMERIKSAAN WHERE ID_Pasien = ?")->execute([$id_edit]);
+            $stmt = $conn->prepare("DELETE FROM PASIEN WHERE ID_Pasien = ?");
+        }
         elseif ($page == 'dokter' || $page == 'perawat') $stmt = $conn->prepare("DELETE FROM TENAGA_MEDIS WHERE ID_Tenaga_Medis = ?");
         elseif ($page == 'rawat_inap') $stmt = $conn->prepare("DELETE FROM RAWAT_INAP WHERE ID_Kamar = ?");
         elseif ($page == 'rekam_medis') $stmt = $conn->prepare("DELETE FROM REKAM_MEDIS WHERE ID_Rekam_Medis = ?");
-        elseif ($page == 'tagihan') $stmt = $conn->prepare("DELETE FROM TAGIHAN WHERE ID_Tagihan = ?");
+        elseif ($page == 'tagihan') {
+            $conn->prepare("DELETE FROM DETAIL_TAGIHAN WHERE ID_Tagihan = ?")->execute([$id_edit]);
+            $stmt = $conn->prepare("DELETE FROM TAGIHAN WHERE ID_Tagihan = ?");
+        }
         
         if (isset($stmt)) {
             $stmt->execute([$id_edit]);
+            $conn->commit();
             header("Location: dashboard.php?page=$page&msg=deleted"); exit();
         }
-    } catch (PDOException $e) { $error = "Gagal Hapus: " . $e->getMessage(); }
+    } catch (PDOException $e) { 
+        $conn->rollBack();
+        $error = "Gagal Hapus: " . $e->getMessage(); 
+    }
 }
 
 // --- 1. LOGIK REKAM MEDIS ---
@@ -67,21 +83,34 @@ if ($page == 'rekam_medis') {
     if (isset($_POST['simpan_rm'])) {
         try {
             $conn->beginTransaction();
+            $status_rawat = $_POST['status_rawat'] ?? 'jalan';
+            // Ambil ID Pasien dari inputan
+            $id_pasien_fix = $_POST['id_pasien']; 
+
+            // 1. Simpan Rekam Medis
             if ($_POST['mode'] == 'update') {
                 $sql = "UPDATE REKAM_MEDIS SET ID_Pasien=?, ID_Tenaga_Medis=?, Tanggal_Catatan=?, Diagnosis=?, Hasil_Pemeriksaan=? WHERE ID_Rekam_Medis=?";
                 $stmt = $conn->prepare($sql);
-                $stmt->execute([$_POST['id_pasien'], $_POST['id_dokter'], $_POST['tanggal'], $_POST['diagnosis'], $_POST['hasil'], $_POST['id_rm']]);
+                $stmt->execute([$id_pasien_fix, $_POST['id_dokter'], $_POST['tanggal'], $_POST['diagnosis'], $_POST['hasil'], $_POST['id_rm']]);
             } else {
                 $sql = "INSERT INTO REKAM_MEDIS (ID_Rekam_Medis, ID_Pasien, ID_Tenaga_Medis, Tanggal_Catatan, Diagnosis, Hasil_Pemeriksaan) VALUES (?, ?, ?, ?, ?, ?)";
                 $stmt = $conn->prepare($sql);
-                $stmt->execute([$_POST['id_rm'], $_POST['id_pasien'], $_POST['id_dokter'], $_POST['tanggal'], $_POST['diagnosis'], $_POST['hasil']]);
+                $stmt->execute([$_POST['id_rm'], $id_pasien_fix, $_POST['id_dokter'], $_POST['tanggal'], $_POST['diagnosis'], $_POST['hasil']]);
             }
 
-            if (!empty($_POST['status_rawat']) && $_POST['status_rawat'] == 'inap' && !empty($_POST['pilih_kamar'])) {
+            // 2. Simpan Rawat Inap (FIX: DITAMBAHKAN ID_PASIEN)
+            if ($status_rawat == 'inap' && !empty($_POST['pilih_kamar'])) {
                 $id_transaksi_inap = autoId($conn, 'id_kamar', 'RAWAT_INAP', 'RI'); 
-                $sql_inap = "INSERT INTO RAWAT_INAP (ID_Kamar, ID_Layanan, Tanggal_Masuk, Tanggal_Keluar) VALUES (?, ?, ?, NULL)";
+                
+                // Query Insert yang Benar (Ada ID_Pasien)
+                $sql_inap = "INSERT INTO RAWAT_INAP (ID_Kamar, ID_Layanan, ID_Pasien, Tanggal_Masuk, Tanggal_Keluar) VALUES (?, ?, ?, ?, NULL)";
                 $stmt_inap = $conn->prepare($sql_inap);
-                $stmt_inap->execute([$id_transaksi_inap, $_POST['pilih_kamar'], $_POST['tanggal']]);
+                $stmt_inap->execute([
+                    $id_transaksi_inap, 
+                    $_POST['pilih_kamar'], 
+                    $id_pasien_fix, // <-- INI YANG TADI KURANG, SEKARANG SUDAH ADA
+                    $_POST['tanggal']
+                ]);
             }
             $conn->commit();
             header("Location: dashboard.php?page=rekam_medis&msg=saved"); exit();
@@ -90,59 +119,13 @@ if ($page == 'rekam_medis') {
         }
     }
     
-        $sql = "
-    SELECT 
-        rm.*,
-        p.Nama AS nama_pasien,
-        tm.Nama_Tenaga_Medis AS nama_dokter,
-
-        -- info_kamar dipakai buat nentuin Rawat Inap / Rawat Jalan
-        COALESCE(
-            -- 1) PRIORITAS: layanan dari DETAIL_PEMERIKSAAN (yang diisi dokter)
-            (
-                SELECT l.Nama_Layanan
-                FROM DETAIL_PEMERIKSAAN dp
-                JOIN LAYANAN l ON l.ID_Layanan = dp.ID_Layanan
-                -- Asumsi: RMxxx berpasangan dengan PExxx (sama seperti di dashboard dokter)
-                WHERE dp.ID_Pemeriksaan = REPLACE(rm.ID_Rekam_Medis, 'RM', 'PE')
-                  AND (
-                        LOWER(l.Nama_Layanan) LIKE '%inap%' 
-                     OR LOWER(l.Nama_Layanan) LIKE '%kamar%'
-                     OR l.ID_Layanan = 'L005'      -- Kamar Rawat Inap Kelas 1
-                  )
-                LIMIT 1
-            ),
-
-            -- 2) Kalau belum ketemu, cek tabel RAWAT_INAP (kalau admin yang buat rawat inap)
-            (
-                SELECT l.Nama_Layanan
-                FROM RAWAT_INAP r
-                JOIN LAYANAN l ON l.ID_Layanan = r.ID_Layanan
-                -- Kamu sebelumnya pakai Tanggal_Catatan vs Tanggal_Masuk sebagai penghubung
-                WHERE r.Tanggal_Masuk = rm.Tanggal_Catatan
-                LIMIT 1
-            ),
-
-            -- 3) Terakhir, fallback ke logika lama: dari TAGIHAN yang belum lunas
-            (
-                SELECT l.Nama_Layanan 
-                FROM TAGIHAN t 
-                JOIN DETAIL_TAGIHAN dt ON t.ID_Tagihan = dt.ID_Tagihan 
-                JOIN LAYANAN l        ON dt.ID_Layanan = l.ID_Layanan 
-                WHERE t.ID_Pasien = p.ID_Pasien 
-                  AND t.Status_Pembayaran = 'Belum Lunas' 
-                  AND (
-                        LOWER(l.Nama_Layanan) LIKE '%inap%' 
-                     OR LOWER(l.Nama_Layanan) LIKE '%kamar%'
-                  )
-                LIMIT 1
-            )
-        ) AS info_kamar
-
-    FROM REKAM_MEDIS rm 
-    JOIN PASIEN       p  ON rm.ID_Pasien       = p.ID_Pasien 
-    JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis
-    ";
+    $sql = "SELECT rm.*, p.Nama AS nama_pasien, tm.Nama_Tenaga_Medis AS nama_dokter,
+            (SELECT l.Nama_Layanan FROM RAWAT_INAP ri 
+             JOIN LAYANAN l ON ri.ID_Layanan = l.ID_Layanan 
+             WHERE ri.ID_Pasien = rm.ID_Pasien AND ri.Tanggal_Masuk = rm.Tanggal_Catatan LIMIT 1) AS info_kamar
+            FROM REKAM_MEDIS rm 
+            JOIN PASIEN p ON rm.ID_Pasien = p.ID_Pasien 
+            JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis";
 
     if (!empty($keyword)) {
         $sql .= " WHERE p.Nama ILIKE ? OR rm.Diagnosis ILIKE ?";
@@ -175,11 +158,18 @@ if ($page == 'pasien') {
             header("Location: dashboard.php?page=pasien&msg=saved"); exit();
         } catch (PDOException $e) { $error = $e->getMessage(); }
     }
+    
+    // Cek Status (Perbaiki Query Status)
     $sql = "SELECT p.*, 
-        (SELECT COUNT(*) FROM RAWAT_INAP ri 
-         WHERE ri.ID_Pasien = p.ID_Pasien 
-         AND ri.Tanggal_Keluar IS NULL) as sedang_dirawat
+            (SELECT COUNT(*) FROM RAWAT_INAP ri 
+             WHERE ri.ID_Pasien = p.ID_Pasien 
+             AND ri.Tanggal_Keluar IS NULL) as is_rawat_inap,
+             
+            (SELECT COUNT(*) FROM TAGIHAN t 
+             WHERE t.ID_Pasien = p.ID_Pasien 
+             AND t.Status_Pembayaran = 'Belum Lunas') as is_belum_bayar
             FROM PASIEN p";
+    
     if (!empty($keyword)) { $sql .= " WHERE p.Nama ILIKE ? OR p.ID_Pasien ILIKE ?"; $stmt = $conn->prepare($sql); $stmt->execute(["%$keyword%", "%$keyword%"]); } else { $sql .= " ORDER BY p.ID_Pasien ASC"; $stmt = $conn->query($sql); }
     $data_pasien = $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
@@ -237,90 +227,66 @@ if ($page == 'dokter' || $page == 'perawat') {
     }
 }
 
-// --- 4. LOGIK RAWAT INAP (MODE MONITOR & CHECKOUT + AUTO TAGIHAN) ---
+// --- 4. LOGIK RAWAT INAP (MONITOR & CHECKOUT FIX) ---
 if ($page == 'rawat_inap') {
     
-    // 1. PROSES CHECKOUT & HITUNG DUIT
+    // CHECKOUT ACTION
     if ($action == 'checkout' && !empty($id_edit)) {
         try {
             $conn->beginTransaction();
             $tgl_keluar = date('Y-m-d');
 
-            // A. Ambil Info Kamar & Cari Siapa Pasiennya (Lewat Tanggal Masuk Rekam Medis)
-            // Karena tabel RAWAT_INAP gak ada ID_Pasien, kita cari pasien yg rekam medisnya di tanggal masuk kamar tsb
-            $sql_cek = "SELECT r.*, l.Tarif_Dasar, l.ID_Layanan,
-                        (SELECT rm.ID_Pasien FROM REKAM_MEDIS rm WHERE rm.Tanggal_Catatan = r.Tanggal_Masuk LIMIT 1) as id_pasien_found
-                        FROM RAWAT_INAP r 
-                        JOIN LAYANAN l ON r.ID_Layanan = l.ID_Layanan 
-                        WHERE r.ID_Kamar = ?";
-            $stmt_cek = $conn->prepare($sql_cek);
-            $stmt_cek->execute([$id_edit]);
-            $data_inap = $stmt_cek->fetch(PDO::FETCH_ASSOC);
+            // 1. Ambil Data (Pastikan kolom ID_Pasien diambil langsung)
+            $stmt = $conn->prepare("SELECT r.*, l.Tarif_Dasar, l.ID_Layanan FROM RAWAT_INAP r JOIN LAYANAN l ON r.ID_Layanan = l.ID_Layanan WHERE r.ID_Kamar = ?");
+            $stmt->execute([$id_edit]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            if ($data_inap && $data_inap['id_pasien_found']) {
-                // B. Hitung Lama Menginap
-                $masuk = new DateTime($data_inap['tanggal_masuk']);
-                $keluar = new DateTime($tgl_keluar);
-                $durasi = $keluar->diff($masuk)->days;
-                if ($durasi == 0) $durasi = 1; // Minimal bayar 1 hari
+            if ($row && !empty($row['id_pasien'])) {
+                // Hitung Biaya
+                $start = new DateTime($row['tanggal_masuk']);
+                $end = new DateTime($tgl_keluar);
+                $days = $end->diff($start)->days;
+                if($days == 0) $days = 1;
+                $total = $days * $row['tarif_dasar'];
 
-                // C. Hitung Total Duit
-                $total_biaya = $durasi * $data_inap['tarif_dasar'];
+                // Update Keluar
+                $conn->prepare("UPDATE RAWAT_INAP SET Tanggal_Keluar = ? WHERE ID_Kamar = ?")->execute([$tgl_keluar, $id_edit]);
 
-                // D. Update Kamar (Set Tanggal Keluar)
-                $stmt = $conn->prepare("UPDATE RAWAT_INAP SET Tanggal_Keluar = ? WHERE ID_Kamar = ?");
-                $stmt->execute([$tgl_keluar, $id_edit]);
-
-                // E. Bikin Tagihan Baru Otomatis (T-Random)
-                $id_tagihan_baru = 'T' . date('ymd') . rand(100, 999);
+                // Buat Tagihan
+                $id_tag = 'T'.date('ymd').rand(100,999);
+                $conn->prepare("INSERT INTO TAGIHAN (ID_Tagihan, ID_Pasien, Tanggal_Tagihan, Total_Biaya, Status_Pembayaran) VALUES (?, ?, ?, ?, 'Belum Lunas')")
+                     ->execute([$id_tag, $row['id_pasien'], $tgl_keluar, $total]);
                 
-                // Insert ke Tabel TAGIHAN
-                $sql_bill = "INSERT INTO TAGIHAN (ID_Tagihan, ID_Pasien, Tanggal_Tagihan, Total_Biaya, Status_Pembayaran) VALUES (?, ?, ?, ?, 'Belum Lunas')";
-                $stmt_bill = $conn->prepare($sql_bill);
-                $stmt_bill->execute([$id_tagihan_baru, $data_inap['id_pasien_found'], $tgl_keluar, $total_biaya]);
-
-                // F. Insert Detail Tagihan (Opsional, biar rapi)
-                $sql_detail = "INSERT INTO DETAIL_TAGIHAN (ID_Tagihan, ID_Layanan, Jumlah, Subtotal) VALUES (?, ?, ?, ?)";
-                $stmt_detail = $conn->prepare($sql_detail);
-                $stmt_detail->execute([$id_tagihan_baru, $data_inap['id_layanan'], $durasi, $total_biaya]);
+                // Insert Detail (Opsional)
+                try {
+                    $conn->prepare("INSERT INTO DETAIL_TAGIHAN VALUES (?, ?, ?, ?)")->execute([$id_tag, $row['id_layanan'], $days, $total]);
+                } catch (Exception $e) {}
 
                 $conn->commit();
-                header("Location: dashboard.php?page=rawat_inap&msg=checkout_sukses");
-                exit();
+                header("Location: dashboard.php?page=rawat_inap&msg=checkout_sukses"); exit();
             } else {
-                // Kalau pasien gak ketemu (Data rekam medisnya gak sinkron tanggalnya)
-                throw new Exception("Data Pasien tidak ditemukan di Rekam Medis pada tanggal tersebut.");
+                throw new Exception("Data tidak valid: ID Pasien tidak ditemukan di data rawat inap.");
             }
-
-        } catch (Exception $e) { 
-            $conn->rollBack(); 
-            $error = "Gagal checkout: " . $e->getMessage(); 
-        }
+        } catch (Exception $e) { $conn->rollBack(); $error = "Gagal Checkout: " . $e->getMessage(); }
     }
 
-    // 2. Proses Hapus Data
     if ($action == 'delete' && !empty($id_edit)) {
         $stmt = $conn->prepare("DELETE FROM RAWAT_INAP WHERE ID_Kamar = ?");
         $stmt->execute([$id_edit]);
-        header("Location: dashboard.php?page=rawat_inap&msg=deleted");
-        exit();
+        header("Location: dashboard.php?page=rawat_inap&msg=deleted"); exit();
     }
 
-    // 3. Tampil Data (Monitor)
-    $sql = "SELECT r.*, l.Nama_Layanan, 
-            COALESCE(
-                (SELECT p.Nama FROM REKAM_MEDIS rm 
-                 JOIN PASIEN p ON rm.ID_Pasien = p.ID_Pasien 
-                 WHERE rm.Tanggal_Catatan = r.Tanggal_Masuk LIMIT 1), 
-            'Pasien Tanpa RM') as nama_pasien
+    // Tampil Data (JOIN LANGSUNG KE PASIEN BIAR NAMA MUNCUL)
+    $sql = "SELECT r.*, l.Nama_Layanan, p.Nama AS nama_pasien 
             FROM RAWAT_INAP r 
-            JOIN LAYANAN l ON r.ID_Layanan = l.ID_Layanan";
+            JOIN LAYANAN l ON r.ID_Layanan = l.ID_Layanan
+            LEFT JOIN PASIEN p ON r.ID_Pasien = p.ID_Pasien";
 
     if (!empty($keyword)) { 
-        $sql .= " WHERE r.ID_Kamar ILIKE ?"; 
+        $sql .= " WHERE r.ID_Kamar ILIKE ? OR p.Nama ILIKE ?"; 
         $sql .= " ORDER BY r.Tanggal_Masuk DESC";
         $stmt = $conn->prepare($sql); 
-        $stmt->execute(["%$keyword%"]); 
+        $stmt->execute(["%$keyword%", "%$keyword%"]); 
     } else { 
         $sql .= " ORDER BY r.Tanggal_Masuk DESC"; 
         $stmt = $conn->query($sql); 
@@ -384,61 +350,11 @@ if ($page == 'tagihan') {
 <div class="container">
 
     <div class="row mb-4">
-        <div class="col-md-2">
-            <a href="laporan_pasien.php" class="text-decoration-none">
-                <div class="card shadow border-0 bg-primary text-white card-stat">
-                    <div class="card-body p-3">
-                        <h6 class="mb-0">Pasien</h6>
-                        <h3 class="mb-0 fw-bold"><?= $stat_pasien ?></h3>
-                        <small class="text-white-50">Detail &rarr;</small>
-                    </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-md-2">
-            <a href="laporan_dokter.php" class="text-decoration-none">
-                <div class="card shadow border-0 bg-success text-white card-stat">
-                    <div class="card-body p-3">
-                        <h6 class="mb-0">Dokter</h6>
-                        <h3 class="mb-0 fw-bold"><?= $stat_dokter ?></h3>
-                        <small class="text-white-50">Detail &rarr;</small>
-                    </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-md-2">
-            <a href="laporan_perawat.php" class="text-decoration-none">
-                <div class="card shadow border-0 bg-info text-white card-stat">
-                    <div class="card-body p-3">
-                        <h6 class="mb-0">Perawat</h6>
-                        <h3 class="mb-0 fw-bold"><?= $stat_perawat ?></h3>
-                        <small class="text-white-50">Detail &rarr;</small>
-                    </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-md-3">
-            <a href="laporan_kunjungan.php" class="text-decoration-none">
-                <div class="card shadow border-0 bg-secondary text-white card-stat">
-                    <div class="card-body p-3">
-                        <h6 class="mb-0">Kunjungan (RM)</h6>
-                        <h3 class="mb-0 fw-bold"><?= $stat_rm ?></h3>
-                        <small class="text-white-50">Laporan &rarr;</small>
-                    </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-md-3">
-            <a href="laporan_keuangan.php" class="text-decoration-none">
-                <div class="card shadow border-0 bg-warning text-dark card-stat">
-                    <div class="card-body p-3">
-                        <h6 class="mb-0">Pendapatan</h6>
-                        <h4 class="mb-0 fw-bold">Rp <?= number_format($stat_uang, 0, ',', '.') ?></h4>
-                        <small class="text-dark-50">Keuangan &rarr;</small>
-                    </div>
-                </div>
-            </a>
-        </div>
+        <div class="col-md-2"><a href="laporan_pasien.php" class="text-decoration-none"><div class="card shadow border-0 bg-primary text-white card-stat"><div class="card-body p-3"><h6 class="mb-0">Pasien</h6><h3 class="mb-0 fw-bold"><?= $stat_pasien ?></h3></div></div></a></div>
+        <div class="col-md-2"><a href="laporan_dokter.php" class="text-decoration-none"><div class="card shadow border-0 bg-success text-white card-stat"><div class="card-body p-3"><h6 class="mb-0">Dokter</h6><h3 class="mb-0 fw-bold"><?= $stat_dokter ?></h3></div></div></a></div>
+        <div class="col-md-2"><a href="laporan_perawat.php" class="text-decoration-none"><div class="card shadow border-0 bg-info text-white card-stat"><div class="card-body p-3"><h6 class="mb-0">Perawat</h6><h3 class="mb-0 fw-bold"><?= $stat_perawat ?></h3></div></div></a></div>
+        <div class="col-md-3"><a href="laporan_kunjungan.php" class="text-decoration-none"><div class="card shadow border-0 bg-secondary text-white card-stat"><div class="card-body p-3"><h6 class="mb-0">Kunjungan (RM)</h6><h3 class="mb-0 fw-bold"><?= $stat_rm ?></h3></div></div></a></div>
+        <div class="col-md-3"><a href="laporan_keuangan.php" class="text-decoration-none"><div class="card shadow border-0 bg-warning text-dark card-stat"><div class="card-body p-3"><h6 class="mb-0">Pendapatan</h6><h4 class="mb-0 fw-bold">Rp <?= number_format($stat_uang, 0, ',', '.') ?></h4></div></div></a></div>
     </div>
 
     <ul class="nav nav-tabs mb-3">
@@ -479,22 +395,11 @@ if ($page == 'tagihan') {
                         
                         <div class="mb-3 p-3 bg-light border rounded">
                             <label class="fw-bold mb-2">Tindakan Lanjutan</label>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="status_rawat" id="jalan" value="jalan" checked onclick="toggleKamar(false)">
-                                <label class="form-check-label" for="jalan">Rawat Jalan / Pulang</label>
-                            </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="status_rawat" id="inap" value="inap" onclick="toggleKamar(true)">
-                                <label class="form-check-label" for="inap">Rawat Inap</label>
-                            </div>
-                            <div id="pilihan_kamar" class="mt-2" style="display:none;">
-                                <label>Pilih Kelas / Kamar:</label>
-                                <select name="pilih_kamar" class="form-select mt-1">
-                                    <option value="">-- Pilih Kamar --</option>
-                                    <?php foreach($list_kamar_layanan as $k): ?>
-                                        <option value="<?= $k['id_layanan'] ?>"><?= $k['nama_layanan'] ?> - Rp <?= number_format($k['tarif_dasar'],0) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
+                            <div class="form-check"><input class="form-check-input" type="radio" name="status_rawat" id="jalan" value="jalan" checked onclick="toggleKamar(false)"><label class="form-check-label" for="jalan">Rawat Jalan / Pulang</label></div>
+                            <div class="form-check mt-2"><input class="form-check-input" type="radio" name="status_rawat" id="inap" value="inap" onclick="toggleKamar(true)"><label class="form-check-label" for="inap">Rawat Inap</label></div>
+                            <div id="pilihan_kamar" class="mt-2 ms-4" style="display:none;">
+                                <label><small>Pilih Kelas / Kamar:</small></label>
+                                <select name="pilih_kamar" class="form-select form-select-sm mt-1"><?php foreach($list_kamar_layanan as $k): ?><option value="<?=$k['id_layanan']?>"><?=$k['nama_layanan']?> - Rp <?=number_format($k['tarif_dasar'],0)?></option><?php endforeach; ?></select>
                                 <small class="text-muted text-danger">*Otomatis membuat data Rawat Inap.</small>
                             </div>
                         </div>
@@ -513,13 +418,7 @@ if ($page == 'tagihan') {
                     <?php foreach($data_rm as $r): ?>
                     <tr>
                         <td><b><?=$r['nama_pasien']?></b></td><td><?=$r['nama_dokter']?></td><td><?= date('d-m-Y', strtotime($r['tanggal_catatan'])) ?></td>
-                        <td>
-                            <?php if(!empty($r['info_kamar'])): ?>
-                                <span class="badge bg-danger">Inap: <?= $r['info_kamar'] ?></span>
-                            <?php else: ?>
-                                <span class="badge bg-success">Rawat Jalan</span>
-                            <?php endif; ?>
-                        </td>
+                        <td><?= !empty($r['info_kamar']) ? "<span class='badge bg-danger'>Inap: {$r['info_kamar']}</span>" : "<span class='badge bg-success'>Rawat Jalan</span>" ?></td>
                         <td><div class="truncate-text"><?= htmlspecialchars($r['hasil_pemeriksaan']) ?></div></td>
                         <td>
                             <button type="button" class="btn btn-info btn-sm text-white" data-bs-toggle="modal" data-bs-target="#modalDetail" data-id="<?= $r['id_rekam_medis'] ?>" data-pasien="<?= $r['nama_pasien'] ?>" data-dokter="<?= $r['nama_dokter'] ?>" data-tgl="<?= date('d F Y', strtotime($r['tanggal_catatan'])) ?>" data-diag="<?= $r['diagnosis'] ?>" data-hasil="<?= $r['hasil_pemeriksaan'] ?>" data-status="<?= !empty($r['info_kamar']) ? 'Rawat Inap ('.$r['info_kamar'].')' : 'Rawat Jalan' ?>"><i class="fas fa-eye"></i></button>
@@ -561,7 +460,17 @@ if ($page == 'tagihan') {
                     <?php foreach($data_pasien as $p): ?>
                     <tr>
                         <td><?=$p['id_pasien']?></td><td><?=$p['nama']?></td><td><?=$p['alamat']?></td>
-                        <td><?= $p['tagihan_aktif'] > 0 ? '<span class="badge bg-danger">Dalam Perawatan</span>' : '<span class="badge bg-success">Pulang</span>' ?></td>
+                        <td>
+                            <?php if($p['is_rawat_inap'] > 0): ?>
+                                <span class="badge bg-danger">Sedang Dirawat</span>
+                            
+                            <?php elseif($p['is_belum_bayar'] > 0): ?>
+                                <span class="badge bg-warning text-dark">Dalam Perawatan (Belum Bayar)</span>
+                            
+                            <?php else: ?>
+                                <span class="badge bg-success">Pulang</span>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <a href="detail_pasien.php?id=<?=$p['id_pasien']?>" class="btn btn-info btn-sm text-white"><i class="fas fa-file-alt"></i> Detail</a>
                             <a href="?page=pasien&action=edit&id=<?=$p['id_pasien']?>" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></a>
@@ -619,7 +528,7 @@ if ($page == 'tagihan') {
                         <div class="mb-2"><label>ID (Otomatis)</label><input type="text" name="id_dokter" class="form-control bg-light" value="<?= $data_edit['id_tenaga_medis'] ?? $next_id ?>" readonly></div>
                         <div class="mb-2"><label>Nama</label><input type="text" name="nama" class="form-control" value="<?= $data_edit['nama_tenaga_medis'] ?? '' ?>" required></div>
                         <div class="mb-2"><label>Departemen</label><select name="id_dept" class="form-select" required><?php foreach($list_dept as $dp): ?><option value="<?=$dp['id_departemen']?>" <?= ($data_edit && $data_edit['id_departemen'] == $dp['id_departemen']) ? 'selected' : '' ?>><?=$dp['nama_departemen']?></option><?php endforeach; ?></select></div>
-                        <div class="mb-3"><label>Spesialisasi</label><input type="text" name="spesialisasi" class="form-control" value="<?= $data_edit['spesialisasi'] ?? '' ?>" required></div>
+                        <div class="mb-3"><label>Spesialis</label><input type="text" name="spesialisasi" class="form-control" value="<?= $data_edit['spesialisasi'] ?? '' ?>" required></div>
                         <button type="submit" name="simpan_dokter" class="btn btn-success w-100">Simpan</button>
                     </form>
                 </div>
@@ -640,7 +549,7 @@ if ($page == 'tagihan') {
     </div>
     <?php endif; ?>
 
-   <?php if ($page == 'rawat_inap'): ?>
+    <?php if ($page == 'rawat_inap'): ?>
         <div class="row">
             <div class="col-md-12">
                 <div class="card shadow mb-4">
@@ -649,7 +558,6 @@ if ($page == 'tagihan') {
                         <small class="text-white-50">Data masuk otomatis dari Rekam Medis</small>
                     </div>
                     <div class="card-body">
-                        
                         <div class="mb-3">
                             <span class="badge bg-danger me-2">Merah = Sedang Dirawat</span>
                             <span class="badge bg-success">Hijau = Sudah Pulang</span>
@@ -671,9 +579,7 @@ if ($page == 'tagihan') {
                             <tbody>
                                 <?php foreach($data_inap as $r): ?>
                                 <?php 
-                                    // Cek apakah pasien masih dirawat (tanggal keluar kosong)
                                     $sedang_dirawat = empty($r['tanggal_keluar']); 
-                                    // Kalau sedang dirawat, barisnya dikasih warna kuning tipis
                                     $bg_row = $sedang_dirawat ? 'table-warning' : ''; 
                                 ?>
                                 <tr class="<?= $bg_row ?>">
@@ -681,9 +587,7 @@ if ($page == 'tagihan') {
                                     <td><?= htmlspecialchars($r['nama_pasien']) ?></td>
                                     <td><?= $r['nama_layanan'] ?></td>
                                     <td><?= date('d-m-Y', strtotime($r['tanggal_masuk'])) ?></td>
-                                    <td>
-                                        <?= $sedang_dirawat ? '-' : date('d-m-Y', strtotime($r['tanggal_keluar'])) ?>
-                                    </td>
+                                    <td><?= $sedang_dirawat ? '-' : date('d-m-Y', strtotime($r['tanggal_keluar'])) ?></td>
                                     <td>
                                         <?php if($sedang_dirawat): ?>
                                             <span class="badge bg-danger">Sedang Dirawat</span>
@@ -693,20 +597,11 @@ if ($page == 'tagihan') {
                                     </td>
                                     <td>
                                         <?php if($sedang_dirawat): ?>
-                                            <a href="?page=rawat_inap&action=checkout&id=<?=$r['id_kamar']?>" 
-                                               class="btn btn-success btn-sm" 
-                                               onclick="return confirm('Pasien sudah boleh pulang (Checkout)? Tanggal keluar akan diisi hari ini.')">
-                                               <i class="fas fa-check-circle"></i> Checkout
-                                            </a>
+                                            <a href="?page=rawat_inap&action=checkout&id=<?=$r['id_kamar']?>" class="btn btn-success btn-sm" onclick="return confirm('Pasien sudah boleh pulang (Checkout)? Tanggal keluar akan diisi hari ini.')"><i class="fas fa-check-circle"></i> Checkout</a>
                                         <?php else: ?>
                                             <button class="btn btn-secondary btn-sm" disabled>Selesai</button>
                                         <?php endif; ?>
-
-                                        <a href="?page=rawat_inap&action=delete&id=<?=$r['id_kamar']?>" 
-                                           class="btn btn-danger btn-sm" 
-                                           onclick="return confirm('Hapus data kamar ini? History akan hilang.')">
-                                           <i class="fas fa-trash"></i>
-                                        </a>
+                                        <a href="?page=rawat_inap&action=delete&id=<?=$r['id_kamar']?>" class="btn btn-danger btn-sm" onclick="return confirm('Hapus data kamar ini? History akan hilang.')"><i class="fas fa-trash"></i></a>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -743,7 +638,7 @@ if ($page == 'tagihan') {
                 <thead class="table-dark"><tr><th>No</th><th>Pasien</th><th>Tanggal</th><th>Biaya</th><th>Status</th><th>Aksi</th></tr></thead>
                 <tbody>
                     <?php foreach($data_tagihan as $t): ?>
-                    <tr><td><?=$t['id_tagihan']?></td><td><?=$t['nama_pasien']?></td><td><?=date('d-m-Y', strtotime($t['tanggal_tagihan']))?></td><td>Rp <?=number_format($t['total_biaya'], 0, ',', '.')?></td><td><span class="badge <?= $t['status_pembayaran']=='Lunas' ? 'bg-success' : 'bg-danger' ?>"><?=$t['status_pembayaran']?></span></td><td><a href="?page=tagihan&action=edit&id=<?=$t['id_tagihan']?>" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></a> <a href="?page=tagihan&action=delete&id=<?=$t['id_tagihan']?>" onclick="return confirm('Yakin?')" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></a></td></tr>
+                    <tr><td><?=$t['id_tagihan']?></td><td><?=$t['nama_pasien']?></td><td><?=date('d-m-Y', strtotime($t['tanggal_tagihan']))?></td><td>Rp <?=number_format($t['total_biaya'], 0, ',', '.')?></td><td><span class="badge <?= $t['status_pembayaran']=='Lunas' ? 'bg-success' : 'bg-danger' ?>"><?=$t['status_pembayaran']?></span></td><td><a href="?page=tagihan&action=edit&id=<?=$t['id_tagihan']?>" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></a> <a href="?page=tagihan&action=delete&id=<?=$t['id_tagihan']?>" onclick="return confirm('Yakin hapus?')" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></a></td></tr>
                     <?php endforeach; ?>
                 </tbody>
             </table>
