@@ -18,7 +18,6 @@ if (!$id_pasien && isset($_SESSION['user_id'])) {
     $id_pasien = $stmt->fetchColumn();
 }
 
-// Kalau masih kosong, hentikan (konfigurasi login perlu dicek)
 if (!$id_pasien) {
     die('ID pasien tidak ditemukan di sesi. Pastikan login pasien menyimpan id_pasien di session.');
 }
@@ -60,15 +59,14 @@ $stmt->execute([$id_pasien]);
 $profil = $stmt->fetch(PDO::FETCH_ASSOC);
 
 // ==========================================================
-// FILTER CARI GLOBAL (UNTUK BEBERAPA TABEL)
+// FILTER CARI GLOBAL + TAB AKTIF
 // ==========================================================
-$keyword = isset($_GET['search']) ? trim($_GET['search']) : '';
-
-// TAB AKTIF (default rekam medis)
-$active_tab = $_GET['tab'] ?? 'rm';
+$keyword    = isset($_GET['q']) ? trim($_GET['q']) : '';
+$activeTab  = $_GET['tab'] ?? 'rekam_medis'; // rekam_medis | pemeriksaan | layanan | tagihan
+$keywordSql = '%' . $keyword . '%';
 
 // ==========================================================
-// DATA REKAM MEDIS PASIEN (HANYA DIRI SENDIRI)
+// DATA REKAM MEDIS
 // ==========================================================
 $sql_rm = "
     SELECT rm.*, 
@@ -81,13 +79,17 @@ $sql_rm = "
             LIMIT 1) AS info_kamar
     FROM REKAM_MEDIS rm
     LEFT JOIN TENAGA_MEDIS tm ON rm.ID_Tenaga_Medis = tm.ID_Tenaga_Medis
-    WHERE rm.ID_Pasien = :id";
-
-$params_rm = [':id' => $id_pasien];
+    WHERE rm.ID_Pasien = :id_pasien
+";
+$params_rm = [':id_pasien' => $id_pasien];
 
 if ($keyword !== '') {
-    $sql_rm .= " AND (rm.Diagnosis ILIKE :kw OR rm.Hasil_Pemeriksaan ILIKE :kw OR tm.Nama_Tenaga_Medis ILIKE :kw)";
-    $params_rm[':kw'] = "%$keyword%";
+    $sql_rm .= " AND (
+        rm.Diagnosis ILIKE :kw
+        OR rm.Hasil_Pemeriksaan ILIKE :kw
+        OR tm.Nama_Tenaga_Medis ILIKE :kw
+    )";
+    $params_rm[':kw'] = $keywordSql;
 }
 $sql_rm .= " ORDER BY rm.Tanggal_Catatan DESC";
 
@@ -96,7 +98,7 @@ $stmt->execute($params_rm);
 $data_rm = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // ==========================================================
-// DATA PEMERIKSAAN (JADWAL / RIWAYAT KUNJUNGAN)
+// DATA PEMERIKSAAN (JADWAL / RIWAYAT)
 // ==========================================================
 $sql_pem = "
     SELECT p.*, 
@@ -105,14 +107,16 @@ $sql_pem = "
     FROM PEMERIKSAAN p
     LEFT JOIN TENAGA_MEDIS tm ON p.ID_Tenaga_Medis = tm.ID_Tenaga_Medis
     LEFT JOIN DETAIL_PEMERIKSAAN dp ON p.ID_Pemeriksaan = dp.ID_Pemeriksaan
-    WHERE p.ID_Pasien = :id
+    WHERE p.ID_Pasien = :id_pasien
 ";
-
-$params_pem = [':id' => $id_pasien];
+$params_pem = [':id_pasien' => $id_pasien];
 
 if ($keyword !== '') {
-    $sql_pem .= " AND (tm.Nama_Tenaga_Medis ILIKE :kw OR p.Ruang_Pemeriksaan ILIKE :kw)";
-    $params_pem[':kw'] = "%$keyword%";
+    $sql_pem .= " AND (
+        tm.Nama_Tenaga_Medis ILIKE :kw
+        OR p.Ruang_Pemeriksaan ILIKE :kw
+    )";
+    $params_pem[':kw'] = $keywordSql;
 }
 
 $sql_pem .= "
@@ -125,7 +129,7 @@ $stmt->execute($params_pem);
 $data_pemeriksaan = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // ==========================================================
-// DATA LAYANAN LANJUTAN YANG PERNAH DITERIMA
+// DATA LAYANAN LANJUTAN
 // ==========================================================
 $sql_layanan = "
     SELECT l.Nama_Layanan, dp.Konsultasi, dp.Suntik_Vitamin,
@@ -133,19 +137,19 @@ $sql_layanan = "
     FROM DETAIL_PEMERIKSAAN dp
     JOIN LAYANAN l ON dp.ID_Layanan = l.ID_Layanan
     JOIN PEMERIKSAAN p ON dp.ID_Pemeriksaan = p.ID_Pemeriksaan
-    WHERE p.ID_Pasien = :id
+    WHERE p.ID_Pasien = :id_pasien
 ";
-
-$params_layanan = [':id' => $id_pasien];
+$params_layanan = [':id_pasien' => $id_pasien];
 
 if ($keyword !== '') {
-    $sql_layanan .= " AND (l.Nama_Layanan ILIKE :kw OR dp.Konsultasi ILIKE :kw OR dp.Suntik_Vitamin ILIKE :kw)";
-    $params_layanan[':kw'] = "%$keyword%";
+    $sql_layanan .= " AND (
+        l.Nama_Layanan ILIKE :kw
+        OR dp.Konsultasi ILIKE :kw
+        OR dp.Suntik_Vitamin ILIKE :kw
+    )";
+    $params_layanan[':kw'] = $keywordSql;
 }
-
-$sql_layanan .= "
-    ORDER BY p.Tanggal_Pemeriksaan DESC, p.Waktu_Pemeriksaan DESC
-";
+$sql_layanan .= " ORDER BY p.Tanggal_Pemeriksaan DESC, p.Waktu_Pemeriksaan DESC";
 
 $stmt = $conn->prepare($sql_layanan);
 $stmt->execute($params_layanan);
@@ -157,14 +161,25 @@ $data_layanan = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $sql_tag = "
     SELECT * 
     FROM TAGIHAN 
-    WHERE ID_Pasien = :id
+    WHERE ID_Pasien = :id_pasien
 ";
+$params_tag = [':id_pasien' => $id_pasien];
 
-$params_tag = [':id' => $id_pasien];
+// kalau ada keyword, dan keyword-nya BUKAN kata umum seperti "rp"/"tagihan"
+if ($keyword !== '' && !in_array($keywordLower, ['rp', 'tagihan', 'bayar'], true)) {
+    $sql_tag .= " AND (
+        ID_Tagihan ILIKE :kw
+        OR Status_Pembayaran ILIKE :kw";
 
-if ($keyword !== '') {
-    $sql_tag .= " AND (ID_Tagihan ILIKE :kw OR Status_Pembayaran ILIKE :kw)";
-    $params_tag[':kw'] = "%$keyword%";
+    $params_tag[':kw'] = $keywordSql;
+
+    // kalau keyword ada angkanya (misal: 400) → cocokkan ke total_biaya
+    if ($keywordDigits !== '') {
+        $sql_tag .= " OR CAST(Total_Biaya AS TEXT) ILIKE :kw_num";
+        $params_tag[':kw_num'] = '%' . $keywordDigits . '%';
+    }
+
+    $sql_tag .= ")";
 }
 
 $sql_tag .= " ORDER BY Tanggal_Tagihan DESC";
@@ -173,29 +188,25 @@ $stmt = $conn->prepare($sql_tag);
 $stmt->execute($params_tag);
 $data_tagihan = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+
 // ==========================================================
-// LOGIKA PINDAH TAB KALAU TAB SEKARANG KOSONG
+// AUTO-SWITCH TAB KALAU TAB AKTIF KOSONG TAPI TAB LAIN ADA HASIL
 // ==========================================================
+$resultsCount = [
+    'rekam_medis'  => count($data_rm),
+    'pemeriksaan'  => count($data_pemeriksaan),
+    'layanan'      => count($data_layanan),
+    'tagihan'      => count($data_tagihan),
+];
+
 if ($keyword !== '') {
-    $has_rm       = count($data_rm) > 0;
-    $has_pem      = count($data_pemeriksaan) > 0;
-    $has_layanan  = count($data_layanan) > 0;
-    $has_tagihan  = count($data_tagihan) > 0;
-
-    // cek apakah tab aktif sekarang punya hasil
-    $current_has = false;
-    if ($active_tab === 'rm')        $current_has = $has_rm;
-    elseif ($active_tab === 'periksa') $current_has = $has_pem;
-    elseif ($active_tab === 'layanan') $current_has = $has_layanan;
-    elseif ($active_tab === 'tagihan') $current_has = $has_tagihan;
-
-    // kalau tab sekarang kosong tapi ada tab lain yang punya hasil → pindah otomatis
-    if (!$current_has) {
-        if ($has_rm)          $active_tab = 'rm';
-        elseif ($has_pem)     $active_tab = 'periksa';
-        elseif ($has_layanan) $active_tab = 'layanan';
-        elseif ($has_tagihan) $active_tab = 'tagihan';
-        // kalau semua kosong, biarin aja tetap tab awal
+    if (isset($resultsCount[$activeTab]) && $resultsCount[$activeTab] === 0) {
+        foreach (['rekam_medis','pemeriksaan','layanan','tagihan'] as $tabName) {
+            if ($resultsCount[$tabName] > 0) {
+                $activeTab = $tabName;
+                break;
+            }
+        }
     }
 }
 ?>
@@ -208,15 +219,6 @@ if ($keyword !== '') {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
         body { background-color:#f5f7fb; }
-
-        .navbar-custom{
-            background: linear-gradient(90deg,#4338ca,#a855f7); /* ungu gradien */
-        }
-        .navbar-custom .navbar-brand,
-        .navbar-custom .navbar-text{
-            color:#fff;
-        }
-
         .card-stat {
             border: none;
             border-radius: 18px;
@@ -225,50 +227,41 @@ if ($keyword !== '') {
         .card-stat h3 { font-size: 1.8rem; }
         .section-title{
             font-weight:600;
-            font-size:1.05rem;
+            font-size:1.1rem;
         }
         .table thead th{
             background:#f0f2f8;
         }
         .badge-soft {
-            background:#f3e8ff; /* ungu muda */
-            color:#7c3aed;
+            background: #e8f5ff;
+            color:#0d6efd;
         }
 
-        .btn-main{
-            background:#7c3aed;
-            border:none;
-            color:#fff;
+        /* shortcut style */
+        .btn-quick {
+            border-radius: 999px;
+            border:1px solid #a855f7;
+            color:#6b21a8;
+            background-color:#faf5ff;
         }
-        .btn-main:hover{
-            background:#6d28d9;
-            color:#fff;
-        }
-
-        .btn-outline-main{
-            border-color:#7c3aed;
-            color:#7c3aed;
-        }
-        .btn-outline-main:hover{
-            background:#7c3aed;
-            color:#fff;
+        .btn-quick:hover{
+            background-color:#e9d5ff;
+            color:#581c87;
         }
     </style>
 </head>
 <body>
 
-<nav class="navbar navbar-expand-lg navbar-dark navbar-custom mb-4 shadow">
+<nav class="navbar navbar-expand-lg navbar-dark mb-4 shadow" style="background:linear-gradient(90deg,#7c3aed,#9333ea);">
     <div class="container">
         <a class="navbar-brand" href="#">
             <i class="fas fa-hospital-user me-2"></i>Portal Pasien
         </a>
-        <div class="navbar-text ms-auto d-flex align-items-center">
+        <div class="navbar-text text-white ms-auto">
             <?php if($profil): ?>
-                <span class="me-3">
-                    Halo, <strong><?= htmlspecialchars($profil['nama']) ?></strong>
-                </span>
+                Halo, <strong><?= htmlspecialchars($profil['nama']) ?></strong>
             <?php endif; ?>
-            <a href="../auth/logout.php" class="btn btn-outline-light btn-sm">
+            <a href="../auth/logout.php" class="btn btn-outline-light btn-sm ms-3">
                 <i class="fas fa-sign-out-alt"></i> Keluar
             </a>
         </div>
@@ -317,10 +310,11 @@ if ($keyword !== '') {
         </div>
     </div>
 
-    <!-- PROFIL & PINTASAN CEPAT -->
+    <!-- PROFIL + PINTASAN CEPAT -->
     <div class="row mb-4">
+        <!-- Profil -->
         <div class="col-md-6">
-            <div class="card border-0 shadow-sm">
+            <div class="card border-0 shadow-sm h-100">
                 <div class="card-header bg-white">
                     <span class="section-title"><i class="fas fa-id-card me-2"></i>Profil Saya</span>
                 </div>
@@ -340,27 +334,34 @@ if ($keyword !== '') {
             </div>
         </div>
 
-        <!-- PINTASAN CEPAT -->
+        <!-- Pintasan Cepat -->
         <div class="col-md-6 mt-3 mt-md-0">
-            <div class="card border-0 shadow-sm">
+            <div class="card border-0 shadow-sm h-100">
                 <div class="card-header bg-white">
                     <span class="section-title"><i class="fas fa-bolt me-2"></i>Pintasan Cepat</span>
                 </div>
                 <div class="card-body">
-                    <div class="d-grid gap-2">
-                        <a href="#rm" class="btn btn-outline-main">
-                            <i class="fas fa-notes-medical me-2"></i>Lihat Rekam Medis
-                        </a>
-                        <a href="#periksa" class="btn btn-outline-main">
-                            <i class="fas fa-stethoscope me-2"></i>Riwayat Pemeriksaan
-                        </a>
-                        <a href="#layanan" class="btn btn-outline-main">
-                            <i class="fas fa-syringe me-2"></i>Layanan Lanjutan
-                        </a>
-                        <a href="#tagihan" class="btn btn-outline-main">
-                            <i class="fas fa-file-invoice-dollar me-2"></i>Lihat Tagihan
-                        </a>
-                    </div>
+                    <button type="button"
+                            class="btn btn-quick w-100 text-start mb-2 quick-shortcut"
+                            data-quick-tab="rekam_medis">
+                        <i class="fas fa-notes-medical me-2"></i>Lihat Rekam Medis
+                    </button>
+                    <button type="button"
+                            class="btn btn-quick w-100 text-start mb-2 quick-shortcut"
+                            data-quick-tab="pemeriksaan">
+                        <i class="fas fa-stethoscope me-2"></i>Riwayat Pemeriksaan
+                    </button>
+                    <button type="button"
+                            class="btn btn-quick w-100 text-start mb-2 quick-shortcut"
+                            data-quick-tab="layanan">
+                        <i class="fas fa-syringe me-2"></i>Layanan Lanjutan
+                    </button>
+                    <button type="button"
+                            class="btn btn-quick w-100 text-start quick-shortcut"
+                            data-quick-tab="tagihan">
+                        <i class="fas fa-file-invoice-dollar me-2"></i>Lihat Tagihan
+                    </button>
+
                     <div class="text-muted small mt-3">
                         Gunakan tombol di atas untuk langsung lompat ke bagian yang Anda butuhkan.
                     </div>
@@ -369,54 +370,61 @@ if ($keyword !== '') {
         </div>
     </div>
 
-    <!-- SEARCH BAR GLOBAL DI ATAS TAB -->
-    <div class="card border-0 shadow-sm mb-3">
-        <div class="card-body">
-            <form method="get" class="row g-2 align-items-center">
-                <div class="col-md-10 col-9">
-                    <input type="text" name="search" class="form-control"
-                           placeholder="Cari rekam medis, pemeriksaan, layanan, atau tagihan..."
-                           value="<?= htmlspecialchars($keyword) ?>">
-                    <!-- simpan tab aktif -->
-                    <input type="hidden" name="tab" id="tabInput" value="<?= htmlspecialchars($active_tab) ?>">
+    <!-- SEARCH BAR GLOBAL -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <form method="get" class="row g-2 align-items-center">
+                        <div class="col-md-10">
+                            <input type="text" name="q" class="form-control"
+                                   placeholder="Cari rekam medis, pemeriksaan, layanan, atau tagihan..."
+                                   value="<?= htmlspecialchars($keyword) ?>">
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-primary w-100" type="submit">
+                                <i class="fas fa-search me-1"></i>Cari
+                            </button>
+                        </div>
+                        <input type="hidden" name="tab" id="searchTabInput" value="<?= htmlspecialchars($activeTab) ?>">
+                    </form>
+                    <?php if ($keyword !== ''): ?>
+                        <div class="text-muted small mt-2">
+                            Menampilkan hasil dengan kata kunci: <strong><?= htmlspecialchars($keyword) ?></strong>
+                        </div>
+                    <?php endif; ?>
                 </div>
-                <div class="col-md-2 col-3">
-                    <button class="btn btn-main w-100" type="submit">
-                        <i class="fas fa-search me-1"></i>Cari
-                    </button>
-                </div>
-            </form>
-            <?php if($keyword !== ''): ?>
-                <div class="text-muted small mt-2">
-                    Menampilkan hasil dengan kata kunci: <strong><?= htmlspecialchars($keyword) ?></strong>
-                </div>
-            <?php endif; ?>
+            </div>
         </div>
     </div>
 
     <!-- TAB KONTEN -->
     <ul class="nav nav-tabs mb-3" id="patientTab" role="tablist">
         <li class="nav-item">
-            <button class="nav-link <?= $active_tab === 'rm' ? 'active' : '' ?>"
-                    id="rm-tab" data-bs-toggle="tab" data-bs-target="#rm" type="button">
+            <button class="nav-link <?= $activeTab==='rekam_medis' ? 'active' : '' ?>"
+                    id="rm-tab" data-bs-toggle="tab" data-bs-target="#rm" type="button"
+                    data-tab-target="rekam_medis">
                 Rekam Medis
             </button>
         </li>
         <li class="nav-item">
-            <button class="nav-link <?= $active_tab === 'periksa' ? 'active' : '' ?>"
-                    id="periksa-tab" data-bs-toggle="tab" data-bs-target="#periksa" type="button">
+            <button class="nav-link <?= $activeTab==='pemeriksaan' ? 'active' : '' ?>"
+                    id="periksa-tab" data-bs-toggle="tab" data-bs-target="#periksa" type="button"
+                    data-tab-target="pemeriksaan">
                 Pemeriksaan
             </button>
         </li>
         <li class="nav-item">
-            <button class="nav-link <?= $active_tab === 'layanan' ? 'active' : '' ?>"
-                    id="layanan-tab" data-bs-toggle="tab" data-bs-target="#layanan" type="button">
+            <button class="nav-link <?= $activeTab==='layanan' ? 'active' : '' ?>"
+                    id="layanan-tab" data-bs-toggle="tab" data-bs-target="#layanan" type="button"
+                    data-tab-target="layanan">
                 Layanan Lanjutan
             </button>
         </li>
         <li class="nav-item">
-            <button class="nav-link <?= $active_tab === 'tagihan' ? 'active' : '' ?>"
-                    id="tagihan-tab" data-bs-toggle="tab" data-bs-target="#tagihan" type="button">
+            <button class="nav-link <?= $activeTab==='tagihan' ? 'active' : '' ?>"
+                    id="tagihan-tab" data-bs-toggle="tab" data-bs-target="#tagihan" type="button"
+                    data-tab-target="tagihan">
                 Tagihan Saya
             </button>
         </li>
@@ -425,7 +433,7 @@ if ($keyword !== '') {
     <div class="tab-content mb-5" id="patientTabContent">
 
         <!-- TAB REKAM MEDIS -->
-        <div class="tab-pane fade <?= $active_tab === 'rm' ? 'show active' : '' ?>" id="rm" role="tabpanel">
+        <div class="tab-pane fade <?= $activeTab==='rekam_medis' ? 'show active' : '' ?>" id="rm" role="tabpanel">
             <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white">
                     <span class="section-title">Riwayat Rekam Medis</span>
@@ -472,7 +480,7 @@ if ($keyword !== '') {
         </div>
 
         <!-- TAB PEMERIKSAAN -->
-        <div class="tab-pane fade <?= $active_tab === 'periksa' ? 'show active' : '' ?>" id="periksa" role="tabpanel">
+        <div class="tab-pane fade <?= $activeTab==='pemeriksaan' ? 'show active' : '' ?>" id="periksa" role="tabpanel">
             <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white">
                     <span class="section-title">Jadwal & Riwayat Pemeriksaan</span>
@@ -520,7 +528,7 @@ if ($keyword !== '') {
         </div>
 
         <!-- TAB LAYANAN LANJUTAN -->
-        <div class="tab-pane fade <?= $active_tab === 'layanan' ? 'show active' : '' ?>" id="layanan" role="tabpanel">
+        <div class="tab-pane fade <?= $activeTab==='layanan' ? 'show active' : '' ?>" id="layanan" role="tabpanel">
             <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white">
                     <span class="section-title">Layanan Lanjutan yang Pernah Diterima</span>
@@ -562,7 +570,7 @@ if ($keyword !== '') {
         </div>
 
         <!-- TAB TAGIHAN -->
-        <div class="tab-pane fade <?= $active_tab === 'tagihan' ? 'show active' : '' ?>" id="tagihan" role="tabpanel">
+        <div class="tab-pane fade <?= $activeTab==='tagihan' ? 'show active' : '' ?>" id="tagihan" role="tabpanel">
             <div class="row">
                 <div class="col-md-4 mb-3">
                     <div class="card border-0 shadow-sm h-100">
@@ -631,23 +639,42 @@ if ($keyword !== '') {
 </div> <!-- /container -->
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    var tabInput = document.getElementById('tabInput');
-    if (!tabInput) return;
+    const tabInput = document.getElementById('searchTabInput');
 
-    var tabButtons = document.querySelectorAll('#patientTab button[data-bs-toggle="tab"]');
-    tabButtons.forEach(function (btn) {
-        btn.addEventListener('shown.bs.tab', function (event) {
-            var target = event.target.getAttribute('data-bs-target'); // contoh: #layanan
-            if (target && target.startsWith('#')) {
-                tabInput.value = target.substring(1); // 'layanan'
+    // update hidden "tab" saat nav tab di-klik
+    if (tabInput) {
+        document.querySelectorAll('[data-tab-target]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                tabInput.value = this.getAttribute('data-tab-target');
+            });
+        });
+    }
+
+    // === PINTASAN CEPAT ===
+    document.querySelectorAll('.quick-shortcut').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            const targetTab = this.getAttribute('data-quick-tab');
+            if (!targetTab) return;
+
+            const navBtn = document.querySelector('.nav-link[data-tab-target="' + targetTab + '"]');
+            if (!navBtn) return;
+
+            const tab = new bootstrap.Tab(navBtn);
+            tab.show();
+
+            if (tabInput) {
+                tabInput.value = targetTab;
+            }
+
+            const tabContainer = document.getElementById('patientTab');
+            if (tabContainer) {
+                tabContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
         });
     });
 });
 </script>
-
 </body>
 </html>
