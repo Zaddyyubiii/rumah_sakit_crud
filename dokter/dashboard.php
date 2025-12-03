@@ -86,33 +86,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // -----------------------------------------------------------
         // Tambah Jadwal Pemeriksaan (ID otomatis)
-        // -----------------------------------------------------------
-        if ($form_type === 'pemeriksaan_add') {
-            $view = 'pemeriksaan';
+      if ($form_type === 'pemeriksaan_add') {
+    $view = 'pemeriksaan';
 
-            $id_pemeriksaan      = generateNextId($conn, 'pemeriksaan', 'id_pemeriksaan', 'PE');
-            $id_pasien           = $_POST['id_pasien'] ?? '';
-            $tanggal_pemeriksaan = $_POST['tanggal_pemeriksaan'] ?? '';
-            $waktu_pemeriksaan   = $_POST['waktu_pemeriksaan'] ?? '';
-            $ruang_pemeriksaan   = trim($_POST['ruang_pemeriksaan'] ?? '');
+    $id_pemeriksaan      = generateNextId($conn, 'pemeriksaan', 'id_pemeriksaan', 'PE');
+    $id_rm_input         = strtoupper(trim($_POST['id_rekam_medis'] ?? ''));
+    $tanggal_pemeriksaan = $_POST['tanggal_pemeriksaan'] ?? '';
+    $waktu_pemeriksaan   = $_POST['waktu_pemeriksaan'] ?? '';
+    $ruang_pemeriksaan   = trim($_POST['ruang_pemeriksaan'] ?? '');
 
-            if ($id_pasien === '' || $tanggal_pemeriksaan === '' || $waktu_pemeriksaan === '' || $ruang_pemeriksaan === '') {
-                throw new Exception("Semua field jadwal pemeriksaan wajib diisi.");
-            }
+    if ($id_rm_input === '' || $tanggal_pemeriksaan === '' || $waktu_pemeriksaan === '' || $ruang_pemeriksaan === '') {
+        throw new Exception("ID Rekam Medis, tanggal, waktu, dan ruang pemeriksaan wajib diisi.");
+    }
 
-            $sql = "INSERT INTO pemeriksaan (
-                        id_pemeriksaan, id_pasien, id_tenaga_medis, 
-                        tanggal_pemeriksaan, waktu_pemeriksaan, ruang_pemeriksaan
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)";
-            $stmt = $conn->prepare($sql);
-            $stmt->execute([
-                $id_pemeriksaan, $id_pasien, $id_tm,
-                $tanggal_pemeriksaan, $waktu_pemeriksaan, $ruang_pemeriksaan
-            ]);
+    // Ambil RM yang dimaksud
+    $stRm = $conn->prepare("
+        SELECT id_rekam_medis, id_pasien, diagnosis, hasil_pemeriksaan
+        FROM rekam_medis
+        WHERE id_rekam_medis = ? AND id_tenaga_medis = ?
+    ");
+    $stRm->execute([$id_rm_input, $id_tm]);
+    $rmRow = $stRm->fetch(PDO::FETCH_ASSOC);
 
-            $flash_success = "Jadwal pemeriksaan baru berhasil dibuat dengan ID $id_pemeriksaan.";
-        }
+    if (!$rmRow) {
+        throw new Exception("ID Rekam Medis $id_rm_input tidak ditemukan atau bukan milik Anda.");
+    }
+
+    // Kalau sudah ada diagnosis / hasil → anggap sudah terisi, jadinya tidak boleh dipakai buat jadwal baru
+    if (trim((string)$rmRow['diagnosis']) !== '' || trim((string)$rmRow['hasil_pemeriksaan']) !== '') {
+        throw new Exception("Rekam Medis $id_rm_input sudah terisi. Silakan edit dari menu Rekam Medis, bukan buat jadwal baru.");
+    }
+
+    // Cek apakah RM ini sudah dipakai di pemeriksaan lain
+    $cekPem = $conn->prepare("SELECT 1 FROM pemeriksaan WHERE id_rekam_medis = ?");
+    $cekPem->execute([$id_rm_input]);
+    if ($cekPem->fetchColumn()) {
+        throw new Exception("Rekam Medis $id_rm_input sudah terhubung ke jadwal pemeriksaan lain.");
+    }
+
+    // Ambil ID pasien dari RM
+    $id_pasien = $rmRow['id_pasien'];
+
+    $sql = "INSERT INTO pemeriksaan (
+                id_pemeriksaan, id_pasien, id_tenaga_medis, 
+                tanggal_pemeriksaan, waktu_pemeriksaan, ruang_pemeriksaan,
+                id_rekam_medis
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)";
+    $stmt = $conn->prepare($sql);
+    $stmt->execute([
+        $id_pemeriksaan,
+        $id_pasien,
+        $id_tm,
+        $tanggal_pemeriksaan,
+        $waktu_pemeriksaan,
+        $ruang_pemeriksaan,
+        $id_rm_input
+    ]);
+
+    $flash_success = "Jadwal pemeriksaan baru berhasil dibuat dengan ID $id_pemeriksaan (Rekam Medis $id_rm_input).";
+}
 
         // -----------------------------------------------------------
         // Tambah / Update Detail Pemeriksaan (Layanan lanjutan)
@@ -727,7 +760,7 @@ if ($view === 'layanan') {
                 <?php endif; ?>
             </div>
 
-        <?php elseif ($view === 'pemeriksaan'): ?>
+              <?php elseif ($view === 'pemeriksaan'): ?>
             <!-- ==========================================
                  PEMERIKSAAN
              ========================================== -->
@@ -757,15 +790,12 @@ if ($view === 'layanan') {
                             <input type="text" placeholder="Otomatis (PExxx)" disabled>
                         </div>
                         <div>
-                            <label>Pasien</label>
-                            <select name="id_pasien">
-                                <option value="">-- Pilih Pasien --</option>
-                                <?php foreach ($daftar_pasien_all as $ps): ?>
-                                    <option value="<?= htmlspecialchars($ps['id_pasien']) ?>">
-                                        <?= htmlspecialchars($ps['nama']) ?> (<?= htmlspecialchars($ps['id_pasien']) ?>)
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
+                            <label>ID Rekam Medis</label>
+                            <input type="text" name="id_rekam_medis" placeholder="RM001">
+                            <div style="font-size:11px; color:#90a4ae; margin-top:2px;">
+                                Isi ID Rekam Medis yang sudah dibuat admin.
+                                Rekam medis yang sudah terisi tidak bisa dipakai lagi.
+                            </div>
                         </div>
                         <div>
                             <label>Tanggal Pemeriksaan</label>
@@ -780,6 +810,7 @@ if ($view === 'layanan') {
                             <input type="text" name="ruang_pemeriksaan" placeholder="R-01">
                         </div>
                     </div>
+
                     <button type="submit" class="btn-primary">Simpan Jadwal</button>
                     <span style="font-size:11px; color:#90a4ae; margin-left:8px;">
                         ID pemeriksaan akan dibuat otomatis (PE001, PE002, ...).
@@ -813,7 +844,11 @@ if ($view === 'layanan') {
                                 <td><?= htmlspecialchars($pe['nama_pasien']) ?></td>
                                 <td><?= date('d-m-Y', strtotime($pe['tanggal_pemeriksaan'])) ?></td>
                                 <td><?= htmlspecialchars($pe['waktu_pemeriksaan']) ?></td>
-                                <td><span class="badge" style="background:#e3f2fd; color:#1565c0;"><?= htmlspecialchars($pe['ruang_pemeriksaan']) ?></span></td>
+                                <td>
+                                    <span class="badge" style="background:#e3f2fd; color:#1565c0;">
+                                        <?= htmlspecialchars($pe['ruang_pemeriksaan']) ?>
+                                    </span>
+                                </td>
                                 <td>
                                     <?php if ($pe['jumlah_detail'] > 0): ?>
                                         <span class="badge badge-success">Selesai</span>
@@ -832,6 +867,10 @@ if ($view === 'layanan') {
                         </tbody>
                     </table>
                 <?php endif; ?>
+            </div>
+
+        <?php elseif ($view === 'layanan'): ?>
+
             </div>
 
         <?php elseif ($view === 'layanan'): ?>
