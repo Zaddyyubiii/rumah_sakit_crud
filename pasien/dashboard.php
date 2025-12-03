@@ -64,6 +64,10 @@ $profil = $stmt->fetch(PDO::FETCH_ASSOC);
 $keyword    = isset($_GET['q']) ? trim($_GET['q']) : '';
 $activeTab  = $_GET['tab'] ?? 'rekam_medis'; // rekam_medis | pemeriksaan | layanan | tagihan
 $keywordSql = '%' . $keyword . '%';
+// helper untuk pencarian tagihan
+$keywordLower  = strtolower($keyword);                  // keyword versi huruf kecil
+$keywordDigits = preg_replace('/\D+/', '', $keyword);   // ambil cuma angka (misal '450.000' → '450000')
+
 
 // ==========================================================
 // DATA REKAM MEDIS
@@ -293,7 +297,7 @@ if ($keyword !== '') {
         <div class="col-md-3 col-6">
             <div class="card card-stat bg-white">
                 <div class="card-body">
-                    <div class="small text-muted">Layanan Lanjutan</div>
+                    <div class="small text-muted">Layanan</div>
                     <h3 class="mb-1"><?= (int)$stat_layanan ?></h3>
                     <div class="text-muted small">Kamar / tindakan tambahan</div>
                 </div>
@@ -354,7 +358,7 @@ if ($keyword !== '') {
                     <button type="button"
                             class="btn btn-quick w-100 text-start mb-2 quick-shortcut"
                             data-quick-tab="layanan">
-                        <i class="fas fa-syringe me-2"></i>Layanan Lanjutan
+                        <i class="fas fa-syringe me-2"></i>Layanan
                     </button>
                     <button type="button"
                             class="btn btn-quick w-100 text-start quick-shortcut"
@@ -418,7 +422,7 @@ if ($keyword !== '') {
             <button class="nav-link <?= $activeTab==='layanan' ? 'active' : '' ?>"
                     id="layanan-tab" data-bs-toggle="tab" data-bs-target="#layanan" type="button"
                     data-tab-target="layanan">
-                Layanan Lanjutan
+                Layanan
             </button>
         </li>
         <li class="nav-item">
@@ -461,13 +465,32 @@ if ($keyword !== '') {
                                             <td><span class="text-danger"><?= htmlspecialchars($r['diagnosis']) ?></span></td>
                                             <td><?= htmlspecialchars($r['hasil_pemeriksaan']) ?></td>
                                             <td>
-                                                <?php if (!empty($r['info_kamar'])): ?>
-                                                    <span class="badge bg-danger">
-                                                        Rawat Inap (<?= htmlspecialchars($r['info_kamar']) ?>)
-                                                    </span>
-                                                <?php else: ?>
-                                                    <span class="badge bg-success">Rawat Jalan</span>
-                                                <?php endif; ?>
+    <?php
+    // baca jenis_rawat dari REKAM_MEDIS
+    $jenis = $r['jenis_rawat'] ?? 'Belum Ditentukan';
+
+    if ($jenis === 'Rawat Inap' || !empty($r['info_kamar'])) {
+        // Kalau di RM tertulis Rawat Inap ATAU memang ada data kamar aktif
+        $labelKamar = $r['info_kamar'] ?? '';
+        ?>
+        <span class="badge bg-danger">
+            Rawat Inap<?= $labelKamar ? ' ('.htmlspecialchars($labelKamar).')' : '' ?>
+        </span>
+    <?php
+    } elseif ($jenis === 'Rawat Jalan') {
+        // Jelas-jelas ditandai Rawat Jalan di rekam_medis
+        ?>
+        <span class="badge bg-success">Rawat Jalan / Pulang</span>
+    <?php
+    } else {
+        // Kalau belum di-set sama sekali
+        ?>
+        <span class="badge bg-secondary">Belum Ditentukan</span>
+    <?php
+    }
+    ?>
+
+
                                             </td>
                                         </tr>
                                     <?php endforeach; ?>
@@ -531,7 +554,7 @@ if ($keyword !== '') {
         <div class="tab-pane fade <?= $activeTab==='layanan' ? 'show active' : '' ?>" id="layanan" role="tabpanel">
             <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white">
-                    <span class="section-title">Layanan Lanjutan yang Pernah Diterima</span>
+                    <span class="section-title">Layanan yang Pernah Diterima</span>
                 </div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
@@ -547,7 +570,7 @@ if ($keyword !== '') {
                             </thead>
                             <tbody>
                                 <?php if (count($data_layanan) == 0): ?>
-                                    <tr><td colspan="5" class="text-center text-muted py-3">Belum ada layanan lanjutan.</td></tr>
+                                    <tr><td colspan="5" class="text-center text-muted py-3">Belum ada layanan.</td></tr>
                                 <?php else: ?>
                                     <?php foreach($data_layanan as $l): ?>
                                         <tr>

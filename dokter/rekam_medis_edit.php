@@ -9,7 +9,10 @@ $id_tm = $_SESSION['id_tenaga_medis'] ?? null;
 if (!$id_tm) die("Akses ditolak.");
 
 $id_rm = $_GET['id'] ?? null;
-if (!$id_rm) { header('Location: dashboard.php?view=rekam_medis'); exit; }
+if (!$id_rm) {
+    header('Location: dashboard.php?view=rekam_medis');
+    exit;
+}
 
 $flash_error = null;
 
@@ -22,49 +25,78 @@ function generateNextId(PDO $conn, string $table, string $column, string $prefix
     return $prefix . str_pad($num, 3, '0', STR_PAD_LEFT);
 }
 
-// Ambil Data
-$stmt = $conn->prepare("SELECT rm.*, p.nama AS nama_pasien 
-                        FROM rekam_medis rm JOIN pasien p ON rm.id_pasien = p.id_pasien 
-                        WHERE rm.id_rekam_medis = ? AND rm.id_tenaga_medis = ?");
+// Ambil Data RM + Pasien
+$stmt = $conn->prepare("
+    SELECT rm.*, p.nama AS nama_pasien 
+    FROM rekam_medis rm 
+    JOIN pasien p ON rm.id_pasien = p.id_pasien 
+    WHERE rm.id_rekam_medis = ? AND rm.id_tenaga_medis = ?
+");
 $stmt->execute([$id_rm, $id_tm]);
 $rm = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if (!$rm) die("Data tidak ditemukan.");
 
-// Cek Status Rawat Inap saat ini di DB (Bukan dari kolom rekam_medis, tapi real dari tabel rawat_inap)
+// Status saat ini dari kolom rekam_medis (supaya sinkron dengan Admin)
+$current_status = $rm['jenis_rawat'] ?? 'Belum Ditentukan';
+$allowed_status = ['Belum Ditentukan', 'Rawat Jalan', 'Rawat Inap'];
+if (!in_array($current_status, $allowed_status, true)) {
+    $current_status = 'Belum Ditentukan';
+}
+
+// Cek apakah pasien sedang punya Rawat Inap aktif (untuk sinkron kamar)
 $cekRI = $conn->prepare("SELECT 1 FROM rawat_inap WHERE id_pasien = ? AND tanggal_keluar IS NULL");
 $cekRI->execute([$rm['id_pasien']]);
-$is_currently_inap = $cekRI->fetchColumn(); 
-$current_status = $is_currently_inap ? 'Rawat Inap' : 'Rawat Jalan';
+$is_currently_inap = (bool)$cekRI->fetchColumn();
 
 // HANDLE POST
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $diagnosis  = $_POST['diagnosis'];
-    $hasil      = $_POST['hasil_pemeriksaan'];
-    $status_new = $_POST['jenis_rawat']; // Rawat Inap / Rawat Jalan
+    $diagnosis  = trim($_POST['diagnosis'] ?? '');
+    $hasil      = trim($_POST['hasil_pemeriksaan'] ?? '');
+    $status_new = $_POST['jenis_rawat'] ?? $current_status;
+
+    if (!in_array($status_new, $allowed_status, true)) {
+        $status_new = $current_status;
+    }
 
     try {
         $conn->beginTransaction();
 
-        // 1. Update Data Teks RM
-        $upd = $conn->prepare("UPDATE rekam_medis SET diagnosis=?, hasil_pemeriksaan=? WHERE id_rekam_medis=?");
-        $upd->execute([$diagnosis, $hasil, $id_rm]);
+        // 1. Update Data Rekam Medis + jenis_rawat
+        $upd = $conn->prepare("
+            UPDATE rekam_medis 
+            SET diagnosis = ?, hasil_pemeriksaan = ?, jenis_rawat = ?
+            WHERE id_rekam_medis = ?
+        ");
+        $upd->execute([$diagnosis, $hasil, $status_new, $id_rm]);
 
-        // 2. LOGIKA SINKRONISASI RAWAT INAP (Manual Override)
-        // Jika status diubah jadi RAWAT INAP (dan sebelumnya belum)
+        // 2. Sinkronisasi dengan RAWAT_INAP
+        // Jika dokter set 'Rawat Inap' dan belum ada rawat inap aktif → buat record baru
         if ($status_new === 'Rawat Inap' && !$is_currently_inap) {
-            // Cari Layanan Kamar Default (L005 / sesuaikan database)
-            $lay = $conn->query("SELECT id_layanan FROM layanan WHERE nama_layanan ILIKE '%Rawat Inap%' LIMIT 1")->fetchColumn();
-            $id_layanan = $lay ? $lay : 'L005'; 
+
+            // Cari layanan kamar default yang mengandung kata "Rawat Inap"
+            $lay = $conn->query("
+                SELECT id_layanan 
+                FROM layanan 
+                WHERE nama_layanan ILIKE '%Rawat Inap%' 
+                LIMIT 1
+            ")->fetchColumn();
+            $id_layanan = $lay ?: 'L005'; // fallback
 
             $id_kamar = generateNextId($conn, 'rawat_inap', 'id_kamar', 'K');
-            $ins = $conn->prepare("INSERT INTO rawat_inap (id_kamar, id_layanan, id_pasien, tanggal_masuk) VALUES (?, ?, ?, ?)");
+            $ins = $conn->prepare("
+                INSERT INTO rawat_inap (id_kamar, id_layanan, id_pasien, tanggal_masuk) 
+                VALUES (?, ?, ?, ?)
+            ");
             $ins->execute([$id_kamar, $id_layanan, $rm['id_pasien'], $rm['tanggal_catatan']]);
-        }
-        // Jika status diubah jadi RAWAT JALAN (dan sebelumnya Inap)
-        elseif ($status_new === 'Rawat Jalan' && $is_currently_inap) {
-            // Check out paksa (set tanggal keluar hari ini)
-            $out = $conn->prepare("UPDATE rawat_inap SET tanggal_keluar = CURRENT_DATE WHERE id_pasien = ? AND tanggal_keluar IS NULL");
+
+        // Jika dokter set 'Rawat Jalan' atau 'Belum Ditentukan' dan ada rawat inap aktif → check-out
+        } elseif ($status_new !== 'Rawat Inap' && $is_currently_inap) {
+            $out = $conn->prepare("
+                UPDATE rawat_inap 
+                SET tanggal_keluar = CURRENT_DATE 
+                WHERE id_pasien = ? AND tanggal_keluar IS NULL
+            ");
             $out->execute([$rm['id_pasien']]);
         }
 
@@ -97,11 +129,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
 <div class="box">
     <h2>Edit Rekam Medis</h2>
-    <?php if($flash_error): ?><div class="alert"><?=$flash_error?></div><?php endif; ?>
+    <?php if($flash_error): ?><div class="alert"><?= htmlspecialchars($flash_error) ?></div><?php endif; ?>
     
     <div class="info">
         Pasien: <b><?= htmlspecialchars($rm['nama_pasien']) ?></b><br>
-        Tanggal: <?= date('d F Y', strtotime($rm['tanggal_catatan'])) ?>
+        Tanggal: <?= date('d F Y', strtotime($rm['tanggal_catatan'])) ?><br>
+        Status saat ini: <b><?= htmlspecialchars($current_status) ?></b>
     </div>
 
     <form method="POST">
@@ -113,11 +146,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         <label>Status Rawat (Override Manual)</label>
         <select name="jenis_rawat">
+            <option value="Belum Ditentukan" <?= $current_status === 'Belum Ditentukan' ? 'selected' : '' ?>>Belum Ditentukan (ikuti sistem)</option>
             <option value="Rawat Jalan" <?= $current_status === 'Rawat Jalan' ? 'selected' : '' ?>>Rawat Jalan / Pulang</option>
-            <option value="Rawat Inap"  <?= $current_status === 'Rawat Inap'  ? 'selected' : '' ?>>Rawat Inap (Masuk Kamar)</option>
+            <option value="Rawat Inap" <?= $current_status === 'Rawat Inap' ? 'selected' : '' ?>>Rawat Inap (Masuk Kamar)</option>
         </select>
         <small style="display:block; margin-top:-10px; margin-bottom:15px; color:#78909c; font-size:12px;">
-            Mengubah ke 'Rawat Inap' akan otomatis memasukkan pasien ke antrian kamar Admin.
+            Mengubah ke 'Rawat Inap' akan otomatis memasukkan pasien ke daftar Rawat Inap Admin. 
+            Mengubah ke 'Rawat Jalan' / 'Belum Ditentukan' akan mengakhiri Rawat Inap aktif.
         </small>
 
         <button type="submit">Simpan Perubahan</button>

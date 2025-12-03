@@ -220,15 +220,19 @@ if ($page == 'pasien') {
         } catch (PDOException $e) { $error = $e->getMessage(); }
     }
     
-    $sql = "SELECT p.*, 
-            (SELECT COUNT(*) FROM RAWAT_INAP ri 
-             WHERE ri.ID_Pasien = p.ID_Pasien 
-             AND ri.Tanggal_Keluar IS NULL) as is_rawat_inap,
-             
+       $sql = "SELECT p.*, 
             (SELECT COUNT(*) FROM TAGIHAN t 
              WHERE t.ID_Pasien = p.ID_Pasien 
-             AND t.Status_Pembayaran = 'Belum Lunas') as is_belum_bayar
+             AND t.Status_Pembayaran = 'Belum Lunas') as is_belum_bayar,
+
+            -- jenis_rawat dari rekam medis TERBARU pasien
+            (SELECT rm.jenis_rawat
+             FROM REKAM_MEDIS rm
+             WHERE rm.ID_Pasien = p.ID_Pasien
+             ORDER BY rm.Tanggal_Catatan DESC, rm.ID_Rekam_Medis DESC
+             LIMIT 1) AS last_jenis_rawat
             FROM PASIEN p";
+
     
     if (!empty($keyword)) { $sql .= " WHERE p.Nama ILIKE ? OR p.ID_Pasien ILIKE ?"; $stmt = $conn->prepare($sql); $stmt->execute(["%$keyword%", "%$keyword%"]); } 
     else { $stmt = $conn->query($sql . " ORDER BY p.ID_Pasien ASC"); }
@@ -489,25 +493,56 @@ if ($page == 'tagihan') {
                 <thead class="table-dark"><tr><th>Pasien</th><th>Dokter</th><th>Tgl</th><th>Status</th><th>Hasil</th><th>Aksi</th></tr></thead>
                 <tbody>
                     <?php foreach($data_rm as $r): ?>
+                        <?php
+    $jenis = $r['jenis_rawat'] ?? 'Belum Ditentukan';
+    if ($jenis === 'Rawat Inap')      $status_text = 'Rawat Inap';
+    elseif ($jenis === 'Rawat Jalan') $status_text = 'Rawat Jalan';
+    else                              $status_text = 'Belum Ditentukan';
+?>
+
                     <tr>
                         <td><b><?=$r['nama_pasien']?></b></td>
                         <td><?=$r['nama_dokter']?></td>
                         <td><?= date('d-m-Y', strtotime($r['tanggal_catatan'])) ?></td>
                         
-                        <td>
-                            <?php if(!empty($r['info_kamar'])): ?>
-                                <span class="badge bg-danger">Inap: <?= $r['info_kamar'] ?></span>
-                            <?php elseif(!empty($r['nama_poli'])): ?>
-                                <span class="badge bg-success">Jalan: <?= $r['nama_poli'] ?></span>
-                            <?php else: ?>
-                                <span class="badge bg-secondary">Belum Ditentukan</span>
-                            <?php endif; ?>
-                        </td>
+                                       <td>
+                    <?php
+                        // pakai jenis_rawat dari tabel REKAM_MEDIS
+                        $jenis = $r['jenis_rawat'] ?? 'Belum Ditentukan';
+
+                        if ($jenis === 'Rawat Inap') {
+                            if (!empty($r['info_kamar'])) {
+                                echo '<span class="badge bg-danger">Inap: ' . htmlspecialchars($r['info_kamar']) . '</span>';
+                            } else {
+                                echo '<span class="badge bg-danger">Rawat Inap</span>';
+                            }
+                        } elseif ($jenis === 'Rawat Jalan') {
+                            if (!empty($r['nama_poli'])) {
+                                echo '<span class="badge bg-success">Jalan: ' . htmlspecialchars($r['nama_poli']) . '</span>';
+                            } else {
+                                echo '<span class="badge bg-success">Rawat Jalan</span>';
+                            }
+                        } else {
+                            echo '<span class="badge bg-secondary">Belum Ditentukan</span>';
+                        }
+                    ?>
+                </td>
                         
                         <td><div class="truncate-text"><?= htmlspecialchars($r['hasil_pemeriksaan']) ?></div></td>
                         
                         <td>
-                            <button type="button" class="btn btn-info btn-sm text-white" data-bs-toggle="modal" data-bs-target="#modalDetail" data-id="<?= $r['id_rekam_medis'] ?>" data-pasien="<?= $r['nama_pasien'] ?>" data-dokter="<?= $r['nama_dokter'] ?>" data-tgl="<?= date('d F Y', strtotime($r['tanggal_catatan'])) ?>" data-diag="<?= $r['diagnosis'] ?>" data-hasil="<?= $r['hasil_pemeriksaan'] ?>" data-status="Belum Ditentukan"><i class="fas fa-eye"></i></button>
+                            <button type="button" class="btn btn-info btn-sm text-white" 
+        data-bs-toggle="modal" data-bs-target="#modalDetail" 
+        data-id="<?= $r['id_rekam_medis'] ?>" 
+        data-pasien="<?= $r['nama_pasien'] ?>" 
+        data-dokter="<?= $r['nama_dokter'] ?>" 
+        data-tgl="<?= date('d F Y', strtotime($r['tanggal_catatan'])) ?>" 
+        data-diag="<?= $r['diagnosis'] ?>" 
+        data-hasil="<?= $r['hasil_pemeriksaan'] ?>" 
+        data-status="<?= htmlspecialchars($status_text) ?>">
+    <i class="fas fa-eye"></i>
+</button>
+
                             
                             <a href="?page=rekam_medis&action=edit&id=<?=$r['id_rekam_medis']?>" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></a>
                             <a href="?page=rekam_medis&action=delete&id=<?=$r['id_rekam_medis']?>" class="btn btn-danger btn-sm" onclick="return confirm('Hapus?')"><i class="fas fa-trash"></i></a>
@@ -550,14 +585,25 @@ if ($page == 'tagihan') {
                         <tr>
                             <td><?=$p['id_pasien']?></td><td><?=$p['nama']?></td><td><?=$p['alamat']?></td>
                             <td>
-                                <?php if($p['is_rawat_inap'] > 0): ?>
-                                    <span class="badge bg-danger">Sedang Dirawat</span>
-                                <?php elseif($p['is_belum_bayar'] > 0): ?>
-                                    <span class="badge bg-warning text-dark">Belum Bayar</span>
-                                <?php else: ?>
-                                    <span class="badge bg-success">Pulang</span>
-                                <?php endif; ?>
-                            </td>
+    <?php
+        $last = $p['last_jenis_rawat'] ?? null;
+
+        if ($last === 'Rawat Inap') {
+            // RM terbaru rawat inap
+            echo '<span class="badge bg-danger">Sedang Dirawat</span>';
+        } elseif ($p['is_belum_bayar'] > 0) {
+            // ada tagihan belum lunas
+            echo '<span class="badge bg-warning text-dark">Belum Bayar</span>';
+        } elseif ($last === 'Rawat Jalan') {
+            // ini pengganti "Pulang" khusus rawat jalan
+            echo '<span class="badge bg-success">Rawat Jalan</span>';
+        } else {
+            // belum ada rm / rm terakhir belum ditentukan
+            echo '<span class="badge bg-secondary">Terdaftar</span>';
+        }
+    ?>
+</td>
+
                             <td>
                                 <a href="detail_pasien.php?id=<?=$p['id_pasien']?>" class="btn btn-info btn-sm text-white"><i class="fas fa-file-alt"></i> Detail</a>
                                 <a href="?page=pasien&action=edit&id=<?=$p['id_pasien']?>" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></a>
