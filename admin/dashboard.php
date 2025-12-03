@@ -20,17 +20,17 @@ function autoId($conn, $col, $table, $prefix) {
 // ==========================================================
 // LOGIK STATISTIK
 // ==========================================================
-$stat_pasien = $conn->query("SELECT COUNT(*) FROM PASIEN")->fetchColumn();
-$stat_dokter = $conn->query("SELECT COUNT(*) FROM DOKTER")->fetchColumn();
+$stat_pasien  = $conn->query("SELECT COUNT(*) FROM PASIEN")->fetchColumn();
+$stat_dokter  = $conn->query("SELECT COUNT(*) FROM DOKTER")->fetchColumn();
 $stat_perawat = $conn->query("SELECT COUNT(*) FROM PERAWAT")->fetchColumn();
-$stat_rm = $conn->query("SELECT COUNT(*) FROM REKAM_MEDIS")->fetchColumn();
-$stat_uang = $conn->query("SELECT COALESCE(SUM(Total_Biaya), 0) FROM TAGIHAN WHERE Status_Pembayaran = 'Lunas'")->fetchColumn();
+$stat_rm      = $conn->query("SELECT COUNT(*) FROM REKAM_MEDIS")->fetchColumn();
+$stat_uang    = $conn->query("SELECT COALESCE(SUM(Total_Biaya), 0) FROM TAGIHAN WHERE Status_Pembayaran = 'Lunas'")->fetchColumn();
 
 // ==========================================================
 // LOGIK CRUD UTAMA
 // ==========================================================
-$page = isset($_GET['page']) ? $_GET['page'] : 'rekam_medis';
-$action = isset($_GET['action']) ? $_GET['action'] : '';
+$page    = isset($_GET['page']) ? $_GET['page'] : 'rekam_medis';
+$action  = isset($_GET['action']) ? $_GET['action'] : '';
 $id_edit = isset($_GET['id']) ? $_GET['id'] : '';
 $keyword = isset($_GET['cari']) ? $_GET['cari'] : '';
 $data_edit = null;
@@ -50,7 +50,13 @@ if ($action == 'delete' && !empty($id_edit)) {
         } 
         elseif ($page == 'dokter' || $page == 'perawat') $stmt = $conn->prepare("DELETE FROM TENAGA_MEDIS WHERE ID_Tenaga_Medis = ?");
         elseif ($page == 'rawat_inap') $stmt = $conn->prepare("DELETE FROM RAWAT_INAP WHERE ID_Kamar = ?");
-        elseif ($page == 'rekam_medis') $stmt = $conn->prepare("DELETE FROM REKAM_MEDIS WHERE ID_Rekam_Medis = ?");
+        
+        // [FIX] Hapus Rekam Medis (Hapus Pemeriksaan dulu biar gak error Foreign Key)
+        elseif ($page == 'rekam_medis') {
+            $conn->prepare("DELETE FROM PEMERIKSAAN WHERE ID_Rekam_Medis = ?")->execute([$id_edit]);
+            $stmt = $conn->prepare("DELETE FROM REKAM_MEDIS WHERE ID_Rekam_Medis = ?");
+        }
+        
         elseif ($page == 'tagihan') {
             $conn->prepare("DELETE FROM DETAIL_TAGIHAN WHERE ID_Tagihan = ?")->execute([$id_edit]);
             $stmt = $conn->prepare("DELETE FROM TAGIHAN WHERE ID_Tagihan = ?");
@@ -76,7 +82,7 @@ if ($page == 'rekam_medis') {
 
     $next_id = autoId($conn, 'id_rekam_medis', 'REKAM_MEDIS', 'RM');
 
-    // --- [BARU] FITUR TAGIH RAWAT JALAN ---
+    // --- FITUR TAGIH RAWAT JALAN (Tombol di tabel RM) ---
     if ($action == 'tagih_jalan' && !empty($id_edit)) {
         try {
             $conn->beginTransaction();
@@ -102,14 +108,15 @@ if ($page == 'rekam_medis') {
                     }
                 }
 
-                // 3. Hitung Biaya Tindakan Dokter
+                // 3. Hitung Biaya Tindakan Dokter (Dari tabel Detail Pemeriksaan)
+                // Cari pemeriksaan yang terhubung dengan RM ini
                 $sql_jasa = "SELECT dp.ID_Layanan, l.Tarif_Dasar 
                              FROM PEMERIKSAAN pe
                              JOIN DETAIL_PEMERIKSAAN dp ON pe.ID_Pemeriksaan = dp.ID_Pemeriksaan
                              JOIN LAYANAN l ON dp.ID_Layanan = l.ID_Layanan
-                             WHERE pe.ID_Pasien = ? AND pe.Tanggal_Pemeriksaan = ?";
+                             WHERE pe.ID_Rekam_Medis = ?";
                 $q_jasa = $conn->prepare($sql_jasa);
-                $q_jasa->execute([$id_pasien, $tgl]);
+                $q_jasa->execute([$id_edit]);
                 $jasas = $q_jasa->fetchAll(PDO::FETCH_ASSOC);
 
                 foreach($jasas as $j) {
@@ -118,7 +125,7 @@ if ($page == 'rekam_medis') {
                 }
 
                 // 4. Buat Tagihan
-                $id_tag = 'TJ' . date('ymd') . rand(10, 99); // ID Tagihan max 10 char
+                $id_tag = 'TJ' . date('ymd') . rand(10, 99); 
                 $conn->prepare("INSERT INTO TAGIHAN (ID_Tagihan, ID_Pasien, Tanggal_Tagihan, Total_Biaya, Status_Pembayaran) VALUES (?, ?, ?, ?, 'Belum Lunas')")
                      ->execute([$id_tag, $id_pasien, $tgl, $grand_total]);
 
@@ -136,7 +143,6 @@ if ($page == 'rekam_medis') {
             $error = "Gagal buat tagihan: " . $e->getMessage();
         }
     }
-    // --- [END BARU] ---
 
     if ($action == 'edit' && !empty($id_edit)) {
         $stmt = $conn->prepare("SELECT * FROM REKAM_MEDIS WHERE ID_Rekam_Medis = ?");
@@ -144,13 +150,13 @@ if ($page == 'rekam_medis') {
         $data_edit = $stmt->fetch(PDO::FETCH_ASSOC);
     }
 
+    // --- PROSES SIMPAN REKAM MEDIS ---
     if (isset($_POST['simpan_rm'])) {
         try {
             $conn->beginTransaction();
-            // Kita ambil ID Pasien dari form
             $id_pasien_fix = $_POST['id_pasien']; 
 
-            // Simpan REKAM MEDIS saja (ID_Poli dikosongkan/NULL)
+            // [FLOW BARU] Admin CUMA simpan data RM (Pasien & Dokter), jadwal urusan dokter nanti.
             if ($_POST['mode'] == 'update') {
                 $sql = "UPDATE REKAM_MEDIS SET ID_Pasien=?, ID_Tenaga_Medis=?, Tanggal_Catatan=?, Diagnosis=?, Hasil_Pemeriksaan=?, ID_Poli=NULL WHERE ID_Rekam_Medis=?";
                 $stmt = $conn->prepare($sql);
@@ -161,7 +167,7 @@ if ($page == 'rekam_medis') {
                 $stmt->execute([$_POST['id_rm'], $id_pasien_fix, $_POST['id_dokter'], $_POST['tanggal'], $_POST['diagnosis'], $_POST['hasil']]);
             }
 
-            // TIDAK ADA INSERT KE RAWAT_INAP (Dihapus sesuai request)
+            // TIDAK ADA INSERT KE PEMERIKSAAN (Dihapus sesuai flow baru)
 
             $conn->commit();
             header("Location: dashboard.php?page=rekam_medis&msg=saved"); exit();
@@ -289,8 +295,8 @@ if ($page == 'rawat_inap') {
             $conn->beginTransaction();
             $tgl_keluar = date('Y-m-d');
 
-            // 1. AMBIL DATA KAMAR & ID PASIEN
-            $sql_cek = "SELECT r.*, l.Tarif_Dasar, l.ID_Layanan, l.Nama_Layanan,
+            // 1. Ambil Data Kamar & Pasien
+            $sql_cek = "SELECT r.*, l.Tarif_Dasar, l.ID_Layanan, 
                         COALESCE(r.ID_Pasien, 
                             (SELECT rm.ID_Pasien FROM REKAM_MEDIS rm WHERE rm.Tanggal_Catatan = r.Tanggal_Masuk LIMIT 1)
                         ) as id_pasien_fix
@@ -303,86 +309,44 @@ if ($page == 'rawat_inap') {
             $data_inap = $stmt_cek->fetch(PDO::FETCH_ASSOC);
 
             if ($data_inap && !empty($data_inap['id_pasien_fix'])) {
-                $id_pasien = $data_inap['id_pasien_fix'];
-                $grand_total = 0;
-                $list_item_tagihan = []; // Keranjang belanja tagihan
-
-                // --- [1] HITUNG BIAYA KAMAR ---
+                // Hitung
                 $masuk = new DateTime($data_inap['tanggal_masuk']);
                 $keluar = new DateTime($tgl_keluar);
                 $durasi = $keluar->diff($masuk)->days;
-                if ($durasi == 0) $durasi = 1; // Minimal 1 hari
+                if ($durasi == 0) $durasi = 1;
+                $total_biaya = $durasi * $data_inap['tarif_dasar'];
 
-                $biaya_kamar = $durasi * $data_inap['tarif_dasar'];
-                $grand_total += $biaya_kamar;
-                
-                // Masukkan Kamar ke list
-                $list_item_tagihan[] = [
-                    'id_layanan' => $data_inap['id_layanan'],
-                    'jumlah' => $durasi,
-                    'subtotal' => $biaya_kamar
-                ];
-
-                // --- [2] HITUNG BIAYA DOKTER (YANG DIINPUT DOKTER) ---
-                // Cari semua layanan di detail_pemeriksaan milik pasien ini
-                // Syarat: Tanggal Pemeriksaan >= Tanggal Masuk Kamar
-                $sql_jasa = "SELECT dp.ID_Layanan, l.Tarif_Dasar 
-                             FROM PEMERIKSAAN pe
-                             JOIN DETAIL_PEMERIKSAAN dp ON pe.ID_Pemeriksaan = dp.ID_Pemeriksaan
-                             JOIN LAYANAN l ON dp.ID_Layanan = l.ID_Layanan
-                             WHERE pe.ID_Pasien = ? 
-                             AND pe.Tanggal_Pemeriksaan >= ? 
-                             AND pe.Tanggal_Pemeriksaan <= ?";
-                
-                $stmt_jasa = $conn->prepare($sql_jasa);
-                // Kita cari dari Tgl Masuk sampai Hari Ini (Checkout)
-                $stmt_jasa->execute([$id_pasien, $data_inap['tanggal_masuk'], $tgl_keluar]);
-                $layanan_tambahan = $stmt_jasa->fetchAll(PDO::FETCH_ASSOC);
-
-                foreach ($layanan_tambahan as $jasa) {
-                    $harga = $jasa['tarif_dasar'];
-                    $grand_total += $harga;
-
-                    // Masukkan ke list
-                    $list_item_tagihan[] = [
-                        'id_layanan' => $jasa['id_layanan'],
-                        'jumlah' => 1,
-                        'subtotal' => $harga
-                    ];
-                }
-
-                // 3. UPDATE STATUS PULANG
+                // Update Keluar
                 $stmt = $conn->prepare("UPDATE RAWAT_INAP SET Tanggal_Keluar = ? WHERE ID_Kamar = ?");
                 $stmt->execute([$tgl_keluar, $id_edit]);
 
-                // 4. BUAT HEADER TAGIHAN
-                $id_tagihan_baru = 'T' . date('ymd') . rand(100, 999);
-                $sql_bill = "INSERT INTO TAGIHAN (ID_Tagihan, ID_Pasien, Tanggal_Tagihan, Total_Biaya, Status_Pembayaran) VALUES (?, ?, ?, ?, 'Belum Lunas')";
-                $stmt_bill = $conn->prepare($sql_bill);
-                $stmt_bill->execute([$id_tagihan_baru, $id_pasien, $tgl_keluar, $grand_total]);
-
-                // 5. MASUKKAN SEMUA ITEM (KAMAR + DOKTER) KE DETAIL TAGIHAN
-                $sql_det = "INSERT INTO DETAIL_TAGIHAN (ID_Tagihan, ID_Layanan, Jumlah, Subtotal) VALUES (?, ?, ?, ?)";
-                $stmt_det = $conn->prepare($sql_det);
-
-                foreach ($list_item_tagihan as $itm) {
-                    try {
-                        $stmt_det->execute([$id_tagihan_baru, $itm['id_layanan'], $itm['qty'], $itm['sub']]);
-                    } catch (Exception $x) {
-                        // Kalau layanan sama, abaikan error duplikat key (biar gak crash)
-                    }
+                // Buat Tagihan (ID LEBIH PENDEK BIAR AMAN)
+                $id_tag = 'T' . date('ymd') . rand(10, 99); 
+                
+                $stmt_bill = $conn->prepare("INSERT INTO TAGIHAN (ID_Tagihan, ID_Pasien, Tanggal_Tagihan, Total_Biaya, Status_Pembayaran) VALUES (?, ?, ?, ?, 'Belum Lunas')");
+                
+                if (!$stmt_bill->execute([$id_tag, $data_inap['id_pasien_fix'], $tgl_keluar, $total_biaya])) {
+                    throw new Exception("Gagal buat tagihan: " . implode(" ", $stmt_bill->errorInfo()));
                 }
 
+                // Insert Detail
+                try {
+                    $conn->prepare("INSERT INTO DETAIL_TAGIHAN (ID_Tagihan, ID_Layanan, Jumlah, Subtotal) VALUES (?, ?, ?, ?)")
+                         ->execute([$id_tag, $data_inap['id_layanan'], $durasi, $total_biaya]);
+                } catch (Exception $x) {}
+
                 $conn->commit();
-                header("Location: dashboard.php?page=rawat_inap&msg=checkout_sukses"); exit();
+                header("Location: dashboard.php?page=rawat_inap&msg=checkout_sukses"); 
+                exit();
 
             } else {
-                throw new Exception("Data Corrupt: ID Pasien tidak ditemukan.");
+                throw new Exception("Data Pasien tidak ditemukan.");
             }
+
         } catch (Exception $e) { 
             $conn->rollBack(); 
-            $err_msg = urlencode($e->getMessage());
-            header("Location: dashboard.php?page=rawat_inap&error=$err_msg"); exit();
+            // Tampilkan error spesifik
+            die("Error Checkout: " . $e->getMessage());
         }
     }
 
@@ -547,6 +511,10 @@ if ($page == 'tagihan') {
                             
                             <a href="?page=rekam_medis&action=edit&id=<?=$r['id_rekam_medis']?>" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></a>
                             <a href="?page=rekam_medis&action=delete&id=<?=$r['id_rekam_medis']?>" class="btn btn-danger btn-sm" onclick="return confirm('Hapus?')"><i class="fas fa-trash"></i></a>
+                            
+                            <?php if($r['sudah_ditagih'] == 0 && empty($r['info_kamar'])): ?>
+                                <a href="?page=rekam_medis&action=tagih_jalan&id=<?=$r['id_rekam_medis']?>" class="btn btn-success btn-sm" onclick="return confirm('Buat Tagihan Rawat Jalan?')"><i class="fas fa-file-invoice-dollar"></i></a>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <?php endforeach; ?>

@@ -1,0 +1,39 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+years = [2018,2019,2020,2021,2022,2023,2024]
+
+# TPT (Feb/Agustus) sesuai tabel A
+tpt_feb = [6.90,6.66,6.88,6.81,6.77,6.37,5.75]
+tpt_aug = [6.60,6.09,6.87,6.83,5.71,5.31,5.14]
+
+df = pd.DataFrame({
+    'Tahun': years,
+    'TPT_Feb': tpt_feb,
+    'TPT_Aug': tpt_aug
+})
+
+plt.figure(figsize=(10,5))
+plt.plot(df['Tahun'], df['TPT_Feb'], marker='o', label='TPT Februari')
+plt.plot(df['Tahun'], df['TPT_Aug'], marker='o', label='TPT Agustus')
+plt.xlabel('Tahun')
+plt.ylabel('TPT (%)')
+plt.title('TPT Kalimantan Timur: Februari vs Agustus (2018-2024)')
+plt.grid(True)
+plt.legend()
+plt.show()
+
+years = [2023, 2024]
+tpak_m = [82.82, 83.75]
+tpak_f = [46.86, 49.07]
+
+plt.figure(figsize=(8,4))
+plt.plot(years, tpak_m, marker='o', label='Laki-laki')
+plt.plot(years, tpak_f, marker='o', label='Perempuan')
+plt.xlabel('Tahun')
+plt.ylabel('TPAK (%)')
+plt.title('TPAK menurut Jenis Kelamin (Agustus 2023-2024)')
+plt.grid(True)
+plt.legend()
+plt.show()

@@ -6,9 +6,7 @@ require_once '../includes/auth_check.php';
 require_role('dokter');
 
 $id_tm = $_SESSION['id_tenaga_medis'] ?? null;
-if (!$id_tm) {
-    die("Akun Anda tidak terhubung dengan Tenaga Medis.");
-}
+if (!$id_tm) die("Akun Anda tidak terhubung dengan Tenaga Medis.");
 
 $id_pemeriksaan = $_GET['id'] ?? null;
 if (!$id_pemeriksaan) {
@@ -19,303 +17,242 @@ if (!$id_pemeriksaan) {
 $flash_success = null;
 $flash_error   = null;
 
-// Ambil data pemeriksaan + pasien + RM
-$sql = "
-    SELECT 
-        pe.id_pemeriksaan,
-        pe.tanggal_pemeriksaan,
-        pe.waktu_pemeriksaan,
-        pe.ruang_pemeriksaan,
-        pe.id_rekam_medis,
-        p.id_pasien,
-        p.nama AS nama_pasien,
-        rm.tanggal_catatan,
-        rm.diagnosis,
-        rm.hasil_pemeriksaan
-    FROM pemeriksaan pe
-    JOIN pasien p      ON pe.id_pasien = p.id_pasien
-    LEFT JOIN rekam_medis rm ON pe.id_rekam_medis = rm.id_rekam_medis
-    WHERE pe.id_pemeriksaan = ? AND pe.id_tenaga_medis = ?
-";
+// Helper ID
+function generateNextId(PDO $conn, string $table, string $column, string $prefix): string {
+    $stmt = $conn->prepare("SELECT $column FROM $table WHERE $column LIKE ? ORDER BY $column DESC LIMIT 1");
+    $stmt->execute([$prefix . '%']);
+    $last = $stmt->fetchColumn();
+    $num = $last ? (int)preg_replace('/\D/', '', $last) + 1 : 1;
+    return $prefix . str_pad($num, 3, '0', STR_PAD_LEFT);
+}
+
+// 1. Ambil Data Pemeriksaan & Pasien
+$sql = "SELECT pe.*, p.id_pasien, p.nama AS nama_pasien, rm.diagnosis, rm.hasil_pemeriksaan
+        FROM pemeriksaan pe
+        JOIN pasien p ON pe.id_pasien = p.id_pasien
+        LEFT JOIN rekam_medis rm ON pe.id_rekam_medis = rm.id_rekam_medis
+        WHERE pe.id_pemeriksaan = ? AND pe.id_tenaga_medis = ?";
 $stmt = $conn->prepare($sql);
 $stmt->execute([$id_pemeriksaan, $id_tm]);
 $detail = $stmt->fetch(PDO::FETCH_ASSOC);
 
-if (!$detail) {
-    die("Pemeriksaan tidak ditemukan atau bukan milik Anda.");
-}
+if (!$detail) die("Pemeriksaan tidak ditemukan atau bukan milik Anda.");
 
-if (!$detail['id_rekam_medis']) {
-    die("Pemeriksaan ini belum dihubungkan dengan Rekam Medis. Buat / perbaiki dari jadwal terlebih dahulu.");
-}
+// 2. Siapkan Data Layanan (Untuk Dropdown Dinamis)
+$layanan_kamar = [];
+$layanan_tindakan = [];
+$all_layanan = $conn->query("SELECT * FROM layanan ORDER BY nama_layanan")->fetchAll(PDO::FETCH_ASSOC);
 
-$id_rm = $detail['id_rekam_medis'];
-
-// Ambil daftar layanan (untuk pilihan layanan lanjutan)
-$daftar_layanan = $conn->query("
-    SELECT id_layanan, nama_layanan
-    FROM layanan
-    ORDER BY nama_layanan
-")->fetchAll(PDO::FETCH_ASSOC);
-
-// Ambil detail_layanan yang sudah ada untuk pemeriksaan ini
-$detail_layanan = $conn->prepare("
-    SELECT dp.id_layanan, l.nama_layanan, dp.konsultasi, dp.suntik_vitamin
-    FROM detail_pemeriksaan dp
-    JOIN layanan l ON dp.id_layanan = l.id_layanan
-    WHERE dp.id_pemeriksaan = ?
-");
-$detail_layanan->execute([$id_pemeriksaan]);
-$detail_layanan = $detail_layanan->fetchAll(PDO::FETCH_ASSOC);
-
-// =============================
-// HANDLE POST
-// =============================
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $diagnosis         = trim($_POST['diagnosis'] ?? '');
-    $hasil_pemeriksaan = trim($_POST['hasil_pemeriksaan'] ?? '');
-    $jenis_rawat       = $_POST['jenis_rawat'] ?? 'Belum Ditentukan';
-
-    $id_layanan_pilih  = $_POST['id_layanan'] ?? '';
-    $konsultasi        = trim($_POST['konsultasi'] ?? '');
-    $suntik_vitamin    = $_POST['suntik_vitamin'] ?? 'Tidak';
-    $suntik_vitamin    = ($suntik_vitamin === 'Ya') ? 'Ya' : 'Tidak';
-
-    try {
-        if ($diagnosis === '' || $hasil_pemeriksaan === '') {
-            throw new Exception("Diagnosis dan hasil pemeriksaan wajib diisi.");
-        }
-
-        // 1) Update rekam medis (diagnosis & hasil)
-        $upRm = $conn->prepare("
-            UPDATE rekam_medis
-            SET diagnosis = ?, hasil_pemeriksaan = ?
-            WHERE id_rekam_medis = ? AND id_tenaga_medis = ?
-        ");
-        $upRm->execute([$diagnosis, $hasil_pemeriksaan, $id_rm, $id_tm]);
-
-        if ($upRm->rowCount() === 0) {
-            throw new Exception("Rekam Medis tidak ditemukan atau bukan milik Anda.");
-        }
-
-        // 2) Kelola jenis rawat via tabel RAWAT_INAP
-        if (!in_array($jenis_rawat, ['Belum Ditentukan', 'Rawat Jalan', 'Rawat Inap'], true)) {
-            $jenis_rawat = 'Belum Ditentukan';
-        }
-
-        // Ambil info RM (pasien + tanggal)
-        $stInfo = $conn->prepare("
-            SELECT id_pasien, tanggal_catatan
-            FROM rekam_medis
-            WHERE id_rekam_medis = ?
-        ");
-        $stInfo->execute([$id_rm]);
-        $rmInfo = $stInfo->fetch(PDO::FETCH_ASSOC);
-
-        if ($rmInfo) {
-            $id_pasien_rm = $rmInfo['id_pasien'];
-            $tgl_rm       = $rmInfo['tanggal_catatan'];
-
-            if ($jenis_rawat === 'Rawat Inap') {
-                // Cari ID layanan rawat inap
-                $id_layanan_inap = $conn->query("
-                    SELECT id_layanan
-                    FROM layanan
-                    WHERE nama_layanan ILIKE '%rawat inap%'
-                    LIMIT 1
-                ")->fetchColumn();
-
-                if (!$id_layanan_inap) {
-                    $id_layanan_inap = 'L005'; // fallback kalau tidak ada
-                }
-
-                // Cek sudah ada rawat inap aktif?
-                $cekRI = $conn->prepare("
-                    SELECT id_kamar
-                    FROM rawat_inap
-                    WHERE id_pasien = ?
-                      AND tanggal_masuk = ?
-                      AND tanggal_keluar IS NULL
-                    LIMIT 1
-                ");
-                $cekRI->execute([$id_pasien_rm, $tgl_rm]);
-                $id_kamar = $cekRI->fetchColumn();
-
-                if (!$id_kamar) {
-                    $id_kamar = generateNextId($conn, 'rawat_inap', 'id_kamar', 'K');
-                    $insRI = $conn->prepare("
-                        INSERT INTO rawat_inap (id_kamar, id_layanan, id_pasien, tanggal_masuk, tanggal_keluar)
-                        VALUES (?, ?, ?, ?, NULL)
-                    ");
-                    $insRI->execute([$id_kamar, $id_layanan_inap, $id_pasien_rm, $tgl_rm]);
-                }
-            } elseif ($jenis_rawat === 'Rawat Jalan') {
-                // Tutup rawat inap aktif di tanggal itu (kalau ada)
-                $updRI = $conn->prepare("
-                    UPDATE rawat_inap
-                    SET tanggal_keluar = COALESCE(tanggal_keluar, CURRENT_DATE)
-                    WHERE id_pasien = ?
-                      AND tanggal_masuk = ?
-                      AND tanggal_keluar IS NULL
-                ");
-                $updRI->execute([$id_pasien_rm, $tgl_rm]);
-            }
-        }
-
-        // 3) Jika dokter mengisi layanan tambahan, simpan ke DETAIL_PEMERIKSAAN
-        if ($id_layanan_pilih !== '' && $konsultasi !== '') {
-            $sqlDet = "
-                INSERT INTO detail_pemeriksaan (id_layanan, id_pemeriksaan, konsultasi, suntik_vitamin)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT (id_layanan, id_pemeriksaan)
-                DO UPDATE SET
-                    konsultasi     = EXCLUDED.konsultasi,
-                    suntik_vitamin = EXCLUDED.suntik_vitamin
-            ";
-            $stDet = $conn->prepare($sqlDet);
-            $stDet->execute([$id_layanan_pilih, $id_pemeriksaan, $konsultasi, $suntik_vitamin]);
-        }
-
-        $flash_success = "Hasil pemeriksaan dan layanan berhasil disimpan.";
-        // Refresh data di halaman
-        header("Location: pemeriksaan_detail.php?id=" . urlencode($id_pemeriksaan));
-        exit;
-
-    } catch (Exception $e) {
-        $flash_error = $e->getMessage();
-    } catch (PDOException $e) {
-        $flash_error = "Kesalahan database: " . $e->getMessage();
+foreach($all_layanan as $l) {
+    if (preg_match('/(Kamar|Inap|VIP)/i', $l['nama_layanan'])) {
+        $layanan_kamar[] = $l;
+    } else {
+        $layanan_tindakan[] = $l;
     }
 }
 
-// Ambil ulang detail_layanan (kalau barusan error, kita tetap pakai query atas)
+// ==========================================================
+// HANDLE POST (Update Diagnosis & Tambah Layanan)
+// ==========================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        $conn->beginTransaction();
+
+        // A. UPDATE DIAGNOSIS & HASIL (Ke tabel Rekam Medis)
+        if (!empty($_POST['diagnosis'])) {
+            $updRM = $conn->prepare("UPDATE rekam_medis SET diagnosis=?, hasil_pemeriksaan=? WHERE id_rekam_medis=?");
+            $updRM->execute([$_POST['diagnosis'], $_POST['hasil_pemeriksaan'], $detail['id_rekam_medis']]);
+        }
+
+        // B. INPUT LAYANAN (Jika diisi)
+        if (!empty($_POST['id_layanan'])) {
+            $id_layanan = $_POST['id_layanan'];
+            $konsultasi = $_POST['konsultasi'] ?? '';
+            $suntik_vit = $_POST['suntik_vitamin'] ?? 'Tidak';
+
+            // Masuk ke Detail Pemeriksaan (Tagihan)
+            $insDet = $conn->prepare("INSERT INTO detail_pemeriksaan (id_layanan, id_pemeriksaan, konsultasi, suntik_vitamin) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING");
+            $insDet->execute([$id_layanan, $id_pemeriksaan, $konsultasi, $suntik_vit]);
+
+            // C. LOGIKA AUTO RAWAT INAP
+            // Cek nama layanan
+            $cekNama = $conn->prepare("SELECT nama_layanan FROM layanan WHERE id_layanan = ?");
+            $cekNama->execute([$id_layanan]);
+            $nama_lay = $cekNama->fetchColumn();
+
+            if (preg_match('/(Kamar|Inap|VIP)/i', $nama_lay)) {
+                // Cek apakah sudah ada di rawat inap aktif
+                $cekRI = $conn->prepare("SELECT 1 FROM rawat_inap WHERE id_pasien = ? AND tanggal_keluar IS NULL");
+                $cekRI->execute([$detail['id_pasien']]);
+                
+                if (!$cekRI->fetchColumn()) {
+                    $id_kamar = generateNextId($conn, 'rawat_inap', 'id_kamar', 'K');
+                    $insRI = $conn->prepare("INSERT INTO rawat_inap (id_kamar, id_layanan, id_pasien, tanggal_masuk) VALUES (?, ?, ?, ?)");
+                    $insRI->execute([$id_kamar, $id_layanan, $detail['id_pasien'], $detail['tanggal_pemeriksaan']]);
+                    $flash_success = "Diagnosis & Layanan Kamar disimpan. Pasien masuk daftar Rawat Inap Admin.";
+                } else {
+                    $flash_success = "Layanan ditambahkan (Pasien sudah berstatus Rawat Inap).";
+                }
+            } else {
+                $flash_success = "Diagnosis & Tindakan berhasil disimpan.";
+            }
+        } else {
+            $flash_success = "Diagnosis berhasil diupdate.";
+        }
+
+        $conn->commit();
+        // Refresh halaman biar data terupdate
+        header("Location: pemeriksaan_detail.php?id=$id_pemeriksaan&msg=ok");
+        exit;
+
+    } catch (Exception $e) {
+        $conn->rollBack();
+        $flash_error = "Error: " . $e->getMessage();
+    }
+}
+
+// Ambil list layanan yang sudah diinput
+$hist_layanan = $conn->prepare("SELECT dp.*, l.nama_layanan FROM detail_pemeriksaan dp JOIN layanan l ON dp.id_layanan = l.id_layanan WHERE dp.id_pemeriksaan = ?");
+$hist_layanan->execute([$id_pemeriksaan]);
+$history = $hist_layanan->fetchAll(PDO::FETCH_ASSOC);
 ?>
+
 <!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
-    <title>Isi Hasil Pemeriksaan</title>
+    <title>Detail Pemeriksaan</title>
     <style>
-        body { margin:0; font-family:system-ui, sans-serif; background:#f3f6f9; }
-        .wrap { max-width:900px; margin:40px auto; background:#fff; padding:24px 28px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.06); }
-        h1 { margin-top:0; font-size:22px; color:#263238; }
-        .meta { font-size:13px; color:#607d8b; margin-bottom:14px; }
-        label { font-size:13px; color:#455a64; display:block; margin-bottom:4px; }
-        input[type=text], textarea, select {
-            width:100%; padding:8px 10px; border-radius:6px;
-            border:1px solid #cfd8dc; font-size:13px;
-        }
-        textarea { min-height:90px; resize:vertical; }
-        .row { margin-bottom:12px; }
-        .btn-primary, .btn-secondary {
-            border-radius:999px; padding:6px 14px; font-size:13px;
-            border:none; cursor:pointer; text-decoration:none; display:inline-block;
-        }
-        .btn-primary { background:#1976d2; color:#fff; }
-        .btn-primary:hover { background:#1258a3; }
-        .btn-secondary { background:#eceff1; color:#37474f; }
-        .btn-secondary:hover { background:#d7dde2; }
-        .alert { padding:8px 12px; border-radius:6px; font-size:13px; margin-bottom:12px; }
-        .alert-error { background:#ffebee; color:#c62828; }
-        .alert-success { background:#e8f5e9; color:#2e7d32; }
-
-        table { width:100%; border-collapse:collapse; font-size:13px; margin-top:16px; }
-        th, td { padding:6px 6px; border-bottom:1px solid #eceff1; text-align:left; }
-        th { background:#f5f7fa; font-weight:600; }
+        body { font-family: system-ui; background: #f3f6f9; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        h1 { margin-top: 0; color: #1565c0; font-size: 24px; }
+        .meta { margin-bottom: 20px; padding: 15px; background: #e3f2fd; border-radius: 8px; font-size: 14px; color: #0d47a1; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; color: #455a64; font-size: 13px; }
+        input, select, textarea { width: 100%; padding: 8px; border: 1px solid #cfd8dc; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
+        textarea { height: 80px; resize: vertical; }
+        .btn { padding: 10px 20px; border: none; border-radius: 99px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; }
+        .btn-primary { background: #1976d2; color: white; }
+        .btn-secondary { background: #eceff1; color: #37474f; margin-right: 10px; }
+        .alert { padding: 10px; margin-bottom: 15px; border-radius: 6px; font-size: 13px; }
+        .alert-success { background: #e8f5e9; color: #2e7d32; }
+        .alert-error { background: #ffebee; color: #c62828; }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 13px; }
+        th, td { padding: 10px; border-bottom: 1px solid #eee; text-align: left; }
+        th { background: #f5f5f5; }
     </style>
 </head>
 <body>
-<div class="wrap">
-    <h1>Isi Hasil Pemeriksaan</h1>
-    <div class="meta">
-        Pemeriksaan: <b><?= htmlspecialchars($detail['id_pemeriksaan']) ?></b><br>
-        Pasien: <b><?= htmlspecialchars($detail['nama_pasien']) ?></b> (<?= htmlspecialchars($detail['id_pasien']) ?>)<br>
-        Tanggal: <?= date('d-m-Y', strtotime($detail['tanggal_pemeriksaan'])) ?>,
-        Waktu: <?= substr($detail['waktu_pemeriksaan'], 0, 5) ?><br>
-        Ruang: <?= htmlspecialchars($detail['ruang_pemeriksaan']) ?><br>
-        Rekam Medis yang dipakai: <b><?= htmlspecialchars($detail['id_rekam_medis']) ?></b>
+
+<div class="container">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h1>Proses Pemeriksaan</h1>
+        <a href="dashboard.php?view=pemeriksaan" class="btn btn-secondary">Kembali</a>
     </div>
 
-    <?php if ($flash_error): ?>
-        <div class="alert alert-error"><?= htmlspecialchars($flash_error) ?></div>
-    <?php endif; ?>
-    <?php if ($flash_success): ?>
-        <div class="alert alert-success"><?= htmlspecialchars($flash_success) ?></div>
-    <?php endif; ?>
+    <?php if(isset($_GET['msg'])): ?> <div class="alert alert-success">Data berhasil disimpan!</div> <?php endif; ?>
+    <?php if($flash_error): ?> <div class="alert alert-error"><?= $flash_error ?></div> <?php endif; ?>
 
-    <form method="post">
-        <div class="row">
-            <label>Diagnosis</label>
-            <input type="text" name="diagnosis" value="<?= htmlspecialchars($detail['diagnosis'] ?? '') ?>">
-        </div>
-        <div class="row">
-            <label>Hasil Pemeriksaan</label>
-            <textarea name="hasil_pemeriksaan"><?= htmlspecialchars($detail['hasil_pemeriksaan'] ?? '') ?></textarea>
-        </div>
-        <div class="row">
-            <label>Jenis Rawat</label>
-            <select name="jenis_rawat">
-                <option value="Belum Ditentukan">Belum Ditentukan</option>
-                <option value="Rawat Jalan">Rawat Jalan</option>
-                <option value="Rawat Inap">Rawat Inap</option>
-            </select>
+    <div class="meta">
+        <strong>Pasien:</strong> <?= htmlspecialchars($detail['nama_pasien']) ?> (ID: <?= $detail['id_pasien'] ?>)<br>
+        <strong>Jadwal:</strong> <?= date('d F Y', strtotime($detail['tanggal_pemeriksaan'])) ?> - <?= $detail['waktu_pemeriksaan'] ?><br>
+        <strong>Ruangan:</strong> <?= $detail['ruang_pemeriksaan'] ?>
+    </div>
+
+    <form method="POST">
+        <div style="background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #eee;">
+            <h3 style="margin-top:0; font-size:16px;">1. Hasil Diagnosis</h3>
+            <div class="form-group">
+                <label>Diagnosis Dokter</label>
+                <input type="text" name="diagnosis" value="<?= htmlspecialchars($detail['diagnosis'] ?? '') ?>" placeholder="Contoh: Demam Berdarah, Flu Ringan...">
+            </div>
+            <div class="form-group">
+                <label>Catatan Pemeriksaan</label>
+                <textarea name="hasil_pemeriksaan" placeholder="Detail hasil pemeriksaan fisik..."><?= htmlspecialchars($detail['hasil_pemeriksaan'] ?? '') ?></textarea>
+            </div>
         </div>
 
-        <hr style="margin:18px 0; border:none; border-top:1px solid #eceff1;">
+        <div style="background: #fff8e1; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ffe0b2;">
+            <h3 style="margin-top:0; font-size:16px;">2. Tindakan & Layanan (Opsional)</h3>
+            <p style="font-size:12px; color:#ef6c00; margin-top:-5px;">Jika memilih <b>Fasilitas Kamar</b>, pasien otomatis masuk status <b>Rawat Inap</b>.</p>
+            
+            <div class="form-group">
+                <label>Tipe Layanan</label>
+                <select id="pilih_tipe" onchange="updateListLayanan()" style="border-color:#ffb74d;">
+                    <option value="">-- Pilih Tipe Dulu --</option>
+                    <option value="jalan">Tindakan Medis / Obat</option>
+                    <option value="inap">Fasilitas Kamar (Rawat Inap)</option>
+                </select>
+            </div>
 
-        <h3 style="margin-top:0; font-size:15px;">Layanan Lanjutan</h3>
-        <div class="row">
-            <label>Layanan</label>
-            <select name="id_layanan">
-                <option value="">-- Pilih Layanan --</option>
-                <?php foreach ($daftar_layanan as $ly): ?>
-                    <option value="<?= htmlspecialchars($ly['id_layanan']) ?>">
-                        <?= htmlspecialchars($ly['nama_layanan']) ?>
-                    </option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        <div class="row">
-            <label>Suntik Vitamin</label>
-            <label style="font-size:12px; margin-right:8px;">
-                <input type="radio" name="suntik_vitamin" value="Ya"> Ya
-            </label>
-            <label style="font-size:12px;">
-                <input type="radio" name="suntik_vitamin" value="Tidak" checked> Tidak
-            </label>
-        </div>
-        <div class="row">
-            <label>Konsultasi / Alasan Tambahan Layanan</label>
-            <textarea name="konsultasi"
-                      placeholder="Misal: kondisi memburuk, perlu operasi / rawat inap / radiologi."></textarea>
+            <div class="form-group">
+                <label>Nama Layanan</label>
+                <select name="id_layanan" id="list_layanan_dinamis">
+                    <option value="">-- Pilih Tipe Diatas --</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>Tambahan: Suntik Vitamin?</label>
+                <select name="suntik_vitamin">
+                    <option value="Tidak">Tidak</option>
+                    <option value="Ya">Ya</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Catatan Tindakan</label>
+                <input type="text" name="konsultasi" placeholder="Keterangan tambahan untuk tindakan ini...">
+            </div>
         </div>
 
-        <button type="submit" class="btn-primary">Simpan Hasil</button>
-        <a href="dashboard.php?view=pemeriksaan" class="btn-secondary">Kembali ke Jadwal Pemeriksaan</a>
+        <button type="submit" class="btn btn-primary" style="width:100%;">SIMPAN HASIL PEMERIKSAAN</button>
     </form>
 
-    <?php if (count($detail_layanan) > 0): ?>
-        <h3 style="margin-top:24px; font-size:15px;">Layanan yang Sudah Dicatat</h3>
-        <table>
-            <thead>
+    <?php if(!empty($history)): ?>
+    <h3 style="margin-top:30px; font-size:16px; border-top:1px solid #eee; padding-top:20px;">Riwayat Tindakan Hari Ini</h3>
+    <table>
+        <thead><tr><th>Layanan</th><th>Catatan</th><th>Vitamin</th></tr></thead>
+        <tbody>
+            <?php foreach($history as $h): ?>
             <tr>
-                <th>Layanan</th>
-                <th>Konsultasi</th>
-                <th>Suntik Vitamin</th>
+                <td><?= htmlspecialchars($h['nama_layanan']) ?></td>
+                <td><?= htmlspecialchars($h['konsultasi']) ?></td>
+                <td><?= htmlspecialchars($h['suntik_vitamin']) ?></td>
             </tr>
-            </thead>
-            <tbody>
-            <?php foreach ($detail_layanan as $dl): ?>
-                <tr>
-                    <td><?= htmlspecialchars($dl['nama_layanan']) ?></td>
-                    <td><?= htmlspecialchars($dl['konsultasi']) ?></td>
-                    <td><?= htmlspecialchars($dl['suntik_vitamin']) ?></td>
-                </tr>
             <?php endforeach; ?>
-            </tbody>
-        </table>
+        </tbody>
+    </table>
     <?php endif; ?>
 
 </div>
+
+<script>
+    const dataKamar = <?php echo json_encode(array_values($layanan_kamar ?? [])); ?>;
+    const dataTindakan = <?php echo json_encode(array_values($layanan_tindakan ?? [])); ?>;
+
+    function updateListLayanan() {
+        const tipe = document.getElementById('pilih_tipe').value;
+        const dropdown = document.getElementById('list_layanan_dinamis');
+        dropdown.innerHTML = '<option value="">-- Pilih Layanan --</option>';
+        
+        let data = (tipe === 'inap') ? dataKamar : (tipe === 'jalan' ? dataTindakan : []);
+        
+        if (data.length > 0) {
+            data.forEach(item => {
+                let opt = document.createElement('option');
+                opt.value = item.id_layanan;
+                opt.text = item.nama_layanan;
+                dropdown.add(opt);
+            });
+        } else {
+            let opt = document.createElement('option');
+            opt.text = (tipe === "") ? "-- Pilih Tipe Dulu --" : "Tidak ada layanan";
+            dropdown.add(opt);
+        }
+    }
+</script>
+
 </body>
 </html>
