@@ -20,7 +20,9 @@ if (!$id_pem) {
 
 $flash_error = null;
 
-// Ambil data pemeriksaan + pasien
+// ------------------------------------------------------------------
+// DATA PEMERIKSAAN
+// ------------------------------------------------------------------
 $sql = "SELECT 
             pe.id_pemeriksaan,
             pe.id_pasien,
@@ -39,11 +41,39 @@ if (!$pem) {
     die("Pemeriksaan tidak ditemukan atau bukan milik Anda.");
 }
 
-// Ambil daftar layanan untuk dropdown
-$daftar_layanan = $conn->query("SELECT id_layanan, nama_layanan FROM layanan ORDER BY nama_layanan")->fetchAll(PDO::FETCH_ASSOC);
+// ID layanan rawat inap (kamar)
+$LAYANAN_INAP_IDS = ['L005', 'L006']; // Kamar Rawat Inap Kelas 1 & VIP
 
-// Cek status rawat awal (berdasarkan layanan yg sudah ada, kalau ada)
-$sqlJR = "SELECT l.id_layanan, l.nama_layanan
+// ------------------------------------------------------------------
+// AMBIL SEMUA LAYANAN & PISAH RAWAT JALAN / INAP
+// ------------------------------------------------------------------
+$daftar_layanan_raw = $conn->query("
+    SELECT id_layanan, nama_layanan 
+    FROM layanan 
+    ORDER BY nama_layanan
+")->fetchAll(PDO::FETCH_ASSOC);
+
+$layanan_jalan = [];
+$layanan_inap  = [];
+
+foreach ($daftar_layanan_raw as $l) {
+    $id_l = trim($l['id_layanan']); // PENTING: buang spasi CHAR(10)
+    $row  = [
+        'id_layanan'   => $id_l,
+        'nama_layanan' => $l['nama_layanan']
+    ];
+
+    if (in_array($id_l, $LAYANAN_INAP_IDS, true)) {
+        $layanan_inap[] = $row;
+    } else {
+        $layanan_jalan[] = $row;
+    }
+}
+
+// ------------------------------------------------------------------
+// TENTUKAN JENIS RAWAT AWAL (DARI LAYANAN YANG SUDAH ADA, JIKA ADA)
+// ------------------------------------------------------------------
+$sqlJR = "SELECT l.id_layanan
           FROM detail_pemeriksaan dp
           JOIN layanan l ON l.id_layanan = dp.id_layanan
           WHERE dp.id_pemeriksaan = ?
@@ -53,16 +83,22 @@ $stJR->execute([$id_pem]);
 $rowJR = $stJR->fetch(PDO::FETCH_ASSOC);
 
 $jenis_rawat_awal = 'Rawat Jalan';
-if ($rowJR && (strpos(strtolower($rowJR['nama_layanan']), 'kamar rawat inap') !== false || $rowJR['id_layanan'] === 'L005')) {
-    $jenis_rawat_awal = 'Rawat Inap';
+if ($rowJR) {
+    $id_l_jr = trim($rowJR['id_layanan']);  // buang spasi lagi
+    if (in_array($id_l_jr, $LAYANAN_INAP_IDS, true)) {
+        $jenis_rawat_awal = 'Rawat Inap';
+    }
 }
 
-// Handle submit
+// ------------------------------------------------------------------
+// HANDLE SUBMIT
+// ------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $id_layanan     = $_POST['id_layanan'] ?? '';
+    $id_layanan     = trim($_POST['id_layanan'] ?? ''); // just in case
     $diagnosis      = trim($_POST['diagnosis'] ?? '');
     $konsultasi     = trim($_POST['konsultasi'] ?? '');
-    $suntik_vitamin = trim($_POST['suntik_vitamin'] ?? '');
+    $suntik_vitamin = $_POST['suntik_vitamin'] ?? 'Tidak';
+    $suntik_vitamin = ($suntik_vitamin === 'Ya') ? 'Ya' : 'Tidak';
     $jenis_rawat    = $_POST['jenis_rawat'] ?? 'Rawat Jalan';
 
     try {
@@ -74,8 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new Exception("Layanan, diagnosis, dan hasil/konsultasi wajib diisi.");
         }
 
-        // kalau dipilih Rawat Inap tapi layanan bukan layanan inap -> paksa ke L005 (Kamar Rawat Inap Kelas 1)
-        $LAYANAN_INAP_IDS = ['L005']; // nanti kalau ada layanan rawat inap lain bisa ditambah di sini
+        // Safety: kalau Rawat Inap tapi layanan bukan kamar, paksa ke L005
         if ($jenis_rawat === 'Rawat Inap' && !in_array($id_layanan, $LAYANAN_INAP_IDS, true)) {
             $id_layanan = 'L005';
         }
@@ -92,11 +127,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stDet = $conn->prepare($sqlDet);
         $stDet->execute([$id_layanan, $id_pem, $konsultasi, $suntik_vitamin]);
 
-        // 2) UPSERT ke rekam_medis (supaya rekam medis selalu ikut ke-update)
+        // 2) UPSERT ke rekam_medis
         $id_pasien   = $pem['id_pasien'];
         $tgl_catatan = $pem['tanggal_pemeriksaan'];
 
-        // ID rekam medis: RM + nomor dari ID_Pemeriksaan
         $num  = preg_replace('/\D/', '', $id_pem);
         $num  = str_pad($num, 3, '0', STR_PAD_LEFT);
         $rm_id = 'RM' . $num;
@@ -116,7 +150,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stRM = $conn->prepare($sqlRM);
         $stRM->execute([$rm_id, $id_pasien, $id_tm, $tgl_catatan, $diagnosis, $konsultasi]);
 
-        // Setelah isi hasil, balik ke jadwal
         header('Location: dashboard.php?view=pemeriksaan');
         exit;
 
@@ -154,6 +187,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .btn-secondary:hover { background:#d7dde2; }
         .alert { padding:8px 12px; border-radius:6px; font-size:13px; margin-bottom:12px; }
         .alert-error { background:#ffebee; color:#c62828; }
+        .radio-inline {
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            font-size:13px;
+            margin-right:12px;
+        }
+        .hidden { display:none; }
     </style>
 </head>
 <body>
@@ -174,27 +215,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <form method="post">
         <div class="row">
             <label>Jenis Perawatan</label>
-            <select name="jenis_rawat">
+            <select name="jenis_rawat" id="jenis_rawat">
                 <option value="Rawat Jalan" <?= $jenis_rawat_awal === 'Rawat Jalan' ? 'selected' : '' ?>>Rawat Jalan</option>
                 <option value="Rawat Inap" <?= $jenis_rawat_awal === 'Rawat Inap' ? 'selected' : '' ?>>Rawat Inap</option>
             </select>
         </div>
 
+        <!-- hidden yang dikirim ke PHP -->
+        <input type="hidden" name="id_layanan" id="id_layanan_hidden">
+
         <div class="row">
             <label>Layanan</label>
-            <select name="id_layanan">
+
+            <!-- Dropdown RAWAT JALAN -->
+            <select id="select_layanan_jalan">
                 <option value="">-- Pilih Layanan --</option>
-                <?php foreach ($daftar_layanan as $l): ?>
+                <?php foreach ($layanan_jalan as $l): ?>
+                    <option value="<?= htmlspecialchars($l['id_layanan']) ?>">
+                        <?= htmlspecialchars($l['nama_layanan']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <!-- Dropdown RAWAT INAP -->
+            <select id="select_layanan_inap" class="hidden">
+                <option value="">-- Pilih Layanan --</option>
+                <?php foreach ($layanan_inap as $l): ?>
                     <option value="<?= htmlspecialchars($l['id_layanan']) ?>">
                         <?= htmlspecialchars($l['nama_layanan']) ?>
                     </option>
                 <?php endforeach; ?>
             </select>
         </div>
+
         <div class="row">
             <label>Suntik Vitamin</label>
-            <input type="text" name="suntik_vitamin" placeholder="Ya / Tidak / Jenis vitamin">
+            <div>
+                <label class="radio-inline">
+                    <input type="radio" name="suntik_vitamin" value="Ya"> Ya
+                </label>
+                <label class="radio-inline">
+                    <input type="radio" name="suntik_vitamin" value="Tidak" checked> Tidak
+                </label>
+            </div>
         </div>
+
         <div class="row">
             <label>Diagnosis</label>
             <input type="text" name="diagnosis" placeholder="Misal: Flu Biasa, Pneumonia, dsb.">
@@ -208,5 +273,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <a href="dashboard.php?view=pemeriksaan" class="btn-secondary">Kembali ke Jadwal</a>
     </form>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const jenisSelect = document.getElementById('jenis_rawat');
+    const jalanSelect = document.getElementById('select_layanan_jalan');
+    const inapSelect  = document.getElementById('select_layanan_inap');
+    const hiddenInput = document.getElementById('id_layanan_hidden');
+
+    if (!jenisSelect || !jalanSelect || !inapSelect || !hiddenInput) return;
+
+    function syncHiddenFromActive() {
+        const isInap = (jenisSelect.value === 'Rawat Inap');
+        const activeSelect = isInap ? inapSelect : jalanSelect;
+        hiddenInput.value = activeSelect.value || '';
+    }
+
+    function updateUI() {
+        const isInap = (jenisSelect.value === 'Rawat Inap');
+
+        if (isInap) {
+            jalanSelect.classList.add('hidden');
+            inapSelect.classList.remove('hidden');
+        } else {
+            inapSelect.classList.add('hidden');
+            jalanSelect.classList.remove('hidden');
+        }
+        syncHiddenFromActive();
+    }
+
+    jenisSelect.addEventListener('change', updateUI);
+    jalanSelect.addEventListener('change', syncHiddenFromActive);
+    inapSelect.addEventListener('change', syncHiddenFromActive);
+
+    // Init pertama
+    updateUI();
+});
+</script>
 </body>
 </html>

@@ -13,6 +13,24 @@ if (!$id_tm) {
     die("<div style='padding:20px; color:red;'>Error: Akun Anda tidak terhubung dengan Data Tenaga Medis. Hubungi Admin.</div>");
 }
 
+// ambil nama dokter dari tabel tenaga_medis
+$nama_dokter = $username; // default fallback
+try {
+    $stNama = $conn->prepare("SELECT * FROM tenaga_medis WHERE id_tenaga_medis = ?");
+    $stNama->execute([$id_tm]);
+    $rowNama = $stNama->fetch(PDO::FETCH_ASSOC);
+    if ($rowNama) {
+        if (!empty($rowNama['nama_tenaga_medis'])) {
+            $nama_dokter = $rowNama['nama_tenaga_medis'];
+        } elseif (!empty($rowNama['nama'])) {
+            $nama_dokter = $rowNama['nama'];
+        }
+    }
+} catch (Exception $e) {
+    // kalau gagal, biarin aja pakai $username
+}
+
+
 // Helper: generate ID otomatis (P001, PE001, dst)
 function generateNextId(PDO $conn, string $table, string $column, string $prefix): string {
     $sql  = "SELECT $column FROM $table WHERE $column LIKE ? ORDER BY $column DESC LIMIT 1";
@@ -105,7 +123,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $id_pemeriksaan = $_POST['id_pemeriksaan'] ?? '';
             $id_layanan     = $_POST['id_layanan'] ?? '';
             $konsultasi     = trim($_POST['konsultasi'] ?? '');
-            $suntik_vitamin = trim($_POST['suntik_vitamin'] ?? '');
+            // radio Ya/Tidak, default: Tidak
+            $suntik_vitamin = $_POST['suntik_vitamin'] ?? 'Tidak';
+            $suntik_vitamin = ($suntik_vitamin === 'Ya') ? 'Ya' : 'Tidak';
 
             if ($id_pemeriksaan === '' || $id_layanan === '' || $konsultasi === '') {
                 throw new Exception("Pemeriksaan, layanan, dan konsultasi wajib diisi.");
@@ -498,13 +518,33 @@ if ($view === 'layanan') {
             background:#ffebee;
             color:#c62828;
         }
+
+        /* Radio Suntik Vitamin */
+        .radio-group-vitamin {
+            display:flex;
+            align-items:center;
+            gap:16px;
+            margin-top:4px;
+        }
+        .radio-inline {
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            margin:0;
+            font-size:12px;
+            color:#37474f;
+        }
+        .radio-inline input {
+            margin:0;
+        }
     </style>
 </head>
 <body>
 <div class="layout">
     <aside class="sidebar">
-        <h2>Dashboard Dokter</h2>
-        <div class="role">Halo, <?= htmlspecialchars($username) ?></div>
+    <h2>Dashboard Dokter</h2>
+    <div class="role">Halo, <?= htmlspecialchars($nama_dokter) ?></div>
+
 
         <a href="?view=rekam_medis" class="<?= $view==='rekam_medis' ? 'active' : '' ?>">Rekam Medis</a>
         <a href="?view=pasien"      class="<?= $view==='pasien' ? 'active' : '' ?>">Pasien Saya</a>
@@ -849,7 +889,16 @@ if ($view === 'layanan') {
                         </div>
                         <div>
                             <label>Suntik Vitamin</label>
-                            <input type="text" name="suntik_vitamin" placeholder="Ya / Tidak / Jenis vitamin">
+                            <div class="radio-group-vitamin">
+                                <label class="radio-inline">
+                                    <input type="radio" name="suntik_vitamin" value="Ya">
+                                    <span>Ya</span>
+                                </label>
+                                <label class="radio-inline">
+                                    <input type="radio" name="suntik_vitamin" value="Tidak" checked>
+                                    <span>Tidak</span>
+                                </label>
+                            </div>
                         </div>
                     </div>
                     <div class="form-grid">

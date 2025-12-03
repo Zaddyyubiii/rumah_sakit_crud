@@ -304,7 +304,7 @@ if ($keyword !== '') {
                 <div class="card-body">
                     <div class="small text-muted">Tagihan Aktif</div>
                     <h3 class="mb-1">Rp <?= number_format($stat_tagihan_aktif, 0, ',', '.') ?></h3>
-                    <div class="text-muted small">Belum lunas / masih dicicil</div>
+                    <div class="text-muted small">Belum lunas</div>
                 </div>
             </div>
         </div>
