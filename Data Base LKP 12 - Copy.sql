@@ -1,163 +1,173 @@
--- 1. HAPUS SEMUA TABEL LAMA (Urutan penting biar gak error foreign key)
-DROP TABLE IF EXISTS DETAIL_PEMERIKSAAN CASCADE;
-DROP TABLE IF EXISTS DETAIL_TAGIHAN CASCADE;
-DROP TABLE IF EXISTS REKAM_MEDIS CASCADE;
-DROP TABLE IF EXISTS PEMERIKSAAN CASCADE;
-DROP TABLE IF EXISTS PERAWAT CASCADE;
-DROP TABLE IF EXISTS DOKTER CASCADE;
-DROP TABLE IF EXISTS LABORATORIUM CASCADE;
-DROP TABLE IF EXISTS RAWAT_JALAN CASCADE;
-DROP TABLE IF EXISTS RAWAT_INAP CASCADE;
-DROP TABLE IF EXISTS TAGIHAN CASCADE;
-DROP TABLE IF EXISTS TENAGA_MEDIS CASCADE;
-DROP TABLE IF EXISTS LAYANAN CASCADE;
-DROP TABLE IF EXISTS PASIEN CASCADE;
-DROP TABLE IF EXISTS DEPARTEMEN CASCADE;
-DROP TABLE IF EXISTS USERS CASCADE;
+-- =========================
+-- DROP SEMUA TABEL
+-- =========================
+DROP TABLE IF EXISTS detail_tagihan CASCADE;
+DROP TABLE IF EXISTS tagihan CASCADE;
+DROP TABLE IF EXISTS detail_pemeriksaan CASCADE;
+DROP TABLE IF EXISTS pemeriksaan CASCADE;
+DROP TABLE IF EXISTS rawat_inap CASCADE;
+DROP TABLE IF EXISTS rekam_medis CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+DROP TABLE IF EXISTS dokter CASCADE;
+DROP TABLE IF EXISTS perawat CASCADE;
+DROP TABLE IF EXISTS tenaga_medis CASCADE;
+DROP TABLE IF EXISTS layanan CASCADE;
+DROP TABLE IF EXISTS pasien CASCADE;
+DROP TABLE IF EXISTS departemen CASCADE;
 
--- 2. BUAT TABEL UTAMA
-CREATE TABLE DEPARTEMEN (
-    ID_Departemen CHAR(10) PRIMARY KEY,
-    Nama_Departemen VARCHAR(100) NOT NULL UNIQUE
+-- =========================
+-- CREATE TABLE
+-- =========================
+
+CREATE TABLE pasien (
+    id_pasien VARCHAR(10) PRIMARY KEY,
+    nama VARCHAR(100),
+    tanggal_lahir DATE,
+    alamat TEXT,
+    nomor_telepon VARCHAR(20)
 );
 
-CREATE TABLE PASIEN (
-    ID_Pasien CHAR(10) PRIMARY KEY,
-    Nama VARCHAR(100) NOT NULL,
-    Tanggal_Lahir DATE NOT NULL,
-    Alamat VARCHAR(255) NOT NULL,
-    Nomor_Telepon VARCHAR(20) NOT NULL UNIQUE
+CREATE TABLE departemen (
+    id_departemen VARCHAR(10) PRIMARY KEY,
+    nama_departemen VARCHAR(100)
 );
 
-CREATE TABLE LAYANAN (
-    ID_Layanan CHAR(10) PRIMARY KEY,
-    Nama_Layanan VARCHAR(100) NOT NULL UNIQUE,
-    Tarif_Dasar DECIMAL(10, 2) NOT NULL
+CREATE TABLE tenaga_medis (
+    id_tenaga_medis VARCHAR(10) PRIMARY KEY,
+    nama_tenaga_medis VARCHAR(100),
+    id_departemen VARCHAR(10),
+    FOREIGN KEY (id_departemen) REFERENCES departemen(id_departemen)
 );
 
-CREATE TABLE TENAGA_MEDIS (
-    ID_Tenaga_Medis CHAR(10) PRIMARY KEY,
-    Nama_Tenaga_Medis VARCHAR(100) NOT NULL,
-    ID_Departemen CHAR(10),
-    FOREIGN KEY (ID_Departemen) REFERENCES DEPARTEMEN(ID_Departemen)
+CREATE TABLE dokter (
+    id_tenaga_medis VARCHAR(10) PRIMARY KEY,
+    spesialisasi VARCHAR(100),
+    FOREIGN KEY (id_tenaga_medis) REFERENCES tenaga_medis(id_tenaga_medis)
 );
 
--- 3. BUAT TABEL TRANSAKSI
-CREATE TABLE TAGIHAN (
-    ID_Tagihan CHAR(10) PRIMARY KEY,
-    ID_Pasien CHAR(10) NOT NULL, 
-    Tanggal_Tagihan DATE NOT NULL,
-    Total_Biaya DECIMAL(10, 2) NOT NULL,
-    Status_Pembayaran VARCHAR(20) NOT NULL CHECK (Status_Pembayaran IN ('Belum Lunas', 'Lunas', 'Dicicil')),
-    FOREIGN KEY (ID_Pasien) REFERENCES PASIEN(ID_Pasien) ON DELETE CASCADE
+CREATE TABLE perawat (
+    id_tenaga_medis VARCHAR(10) PRIMARY KEY,
+    shift VARCHAR(20),
+    FOREIGN KEY (id_tenaga_medis) REFERENCES tenaga_medis(id_tenaga_medis)
 );
 
-CREATE TABLE RAWAT_INAP (
-    ID_Kamar CHAR(10) PRIMARY KEY,
-    ID_Layanan CHAR(10) NOT NULL, 
-    ID_Pasien CHAR(10) NOT NULL, -- PENTING: Kolom ini wajib ada!
-    Tanggal_Masuk DATE NOT NULL,
-    Tanggal_Keluar DATE,
-    FOREIGN KEY (ID_Layanan) REFERENCES LAYANAN(ID_Layanan),
-    FOREIGN KEY (ID_Pasien) REFERENCES PASIEN(ID_Pasien) ON DELETE cascade,
-    CHECK (Tanggal_Keluar IS NULL OR Tanggal_Keluar >= Tanggal_Masuk)
+CREATE TABLE layanan (
+    id_layanan VARCHAR(10) PRIMARY KEY,
+    nama_layanan VARCHAR(100),
+    tarif_dasar INT,
+    jenis_layanan VARCHAR(20)
 );
 
-CREATE TABLE RAWAT_JALAN (
-    ID_Poli CHAR(10) PRIMARY KEY,
-    ID_Layanan CHAR(10) NOT NULL,
-    FOREIGN KEY (ID_Layanan) REFERENCES LAYANAN(ID_Layanan)
+CREATE TABLE rekam_medis (
+    id_rekam_medis VARCHAR(10) PRIMARY KEY,
+    id_pasien VARCHAR(10),
+    id_tenaga_medis VARCHAR(10),
+    tanggal_catatan DATE,
+    jenis_rawat VARCHAR(20),
+    diagnosis TEXT,
+    hasil_pemeriksaan TEXT,
+    FOREIGN KEY (id_pasien) REFERENCES pasien(id_pasien),
+    FOREIGN KEY (id_tenaga_medis) REFERENCES tenaga_medis(id_tenaga_medis)
 );
 
-CREATE TABLE DOKTER (
-    ID_Tenaga_Medis CHAR(10) PRIMARY KEY,
-    Spesialisasi VARCHAR(100) NOT NULL,
-    FOREIGN KEY (ID_Tenaga_Medis) REFERENCES TENAGA_MEDIS(ID_Tenaga_Medis) ON DELETE CASCADE
+CREATE TABLE pemeriksaan (
+    id_pemeriksaan VARCHAR(10) PRIMARY KEY,
+    id_rekam_medis VARCHAR(10),
+    id_tenaga_medis VARCHAR(10),
+    tanggal_pemeriksaan DATE,
+    waktu_pemeriksaan TIME,
+    ruang_pemeriksaan VARCHAR(50),
+    diagnosis TEXT,
+    hasil_pemeriksaan TEXT,
+    FOREIGN KEY (id_rekam_medis) REFERENCES rekam_medis(id_rekam_medis),
+    FOREIGN KEY (id_tenaga_medis) REFERENCES tenaga_medis(id_tenaga_medis)
 );
 
-CREATE TABLE PERAWAT (
-    ID_Tenaga_Medis CHAR(10) PRIMARY KEY,
-    Shift VARCHAR(100) NOT NULL,
-    FOREIGN KEY (ID_Tenaga_Medis) REFERENCES TENAGA_MEDIS(ID_Tenaga_Medis) ON DELETE CASCADE
+CREATE TABLE detail_pemeriksaan (
+    id_pemeriksaan VARCHAR(10),
+    id_layanan VARCHAR(10),
+    PRIMARY KEY (id_pemeriksaan, id_layanan),
+    FOREIGN KEY (id_pemeriksaan) REFERENCES pemeriksaan(id_pemeriksaan),
+    FOREIGN KEY (id_layanan) REFERENCES layanan(id_layanan)
 );
 
-CREATE TABLE REKAM_MEDIS (
-    ID_Rekam_Medis CHAR(10) PRIMARY KEY,
-    ID_Pasien CHAR(10) NOT NULL, 
-    ID_Tenaga_Medis CHAR(10) NOT NULL, 
-    Tanggal_Catatan DATE NOT NULL, 
-    Diagnosis VARCHAR(100) NOT NULL, 
-    Hasil_Pemeriksaan VARCHAR(100) NOT NULL,
-    ID_Poli CHAR(10), -- PENTING: Kolom ini wajib ada!
-    FOREIGN KEY (ID_Pasien) REFERENCES PASIEN(ID_Pasien) ON DELETE CASCADE,
-    FOREIGN KEY (ID_Tenaga_Medis) REFERENCES TENAGA_MEDIS(ID_Tenaga_Medis),
-    FOREIGN KEY (ID_Poli) REFERENCES RAWAT_JALAN(ID_Poli)
+CREATE TABLE rawat_inap (
+    id_kamar VARCHAR(10) PRIMARY KEY,
+    tanggal_masuk DATE,
+    tanggal_keluar DATE,
+    id_pasien VARCHAR(10),
+    id_layanan VARCHAR(10),
+    FOREIGN KEY (id_pasien) REFERENCES pasien(id_pasien),
+    FOREIGN KEY (id_layanan) REFERENCES layanan(id_layanan)
 );
 
-CREATE TABLE DETAIL_TAGIHAN (
-    ID_Tagihan CHAR(10),
-    ID_Layanan CHAR(10),
-    Jumlah INT NOT NULL, 
-    Subtotal DECIMAL(10, 2) NOT NULL,
-    PRIMARY KEY (ID_Tagihan, ID_Layanan),
-    FOREIGN KEY (ID_Tagihan) REFERENCES TAGIHAN(ID_Tagihan) ON DELETE CASCADE,
-    FOREIGN KEY (ID_Layanan) REFERENCES LAYANAN(ID_Layanan)
+CREATE TABLE tagihan (
+    id_tagihan VARCHAR(15) PRIMARY KEY,
+    tanggal_tagihan DATE,
+    total_biaya INT,
+    status_pembayaran VARCHAR(20),
+    id_pasien VARCHAR(10),
+    FOREIGN KEY (id_pasien) REFERENCES pasien(id_pasien)
 );
 
-CREATE TABLE PEMERIKSAAN (
-    ID_Pemeriksaan CHAR(10) PRIMARY KEY,
-    ID_Pasien CHAR(10) NOT NULL, 
-    ID_Tenaga_Medis CHAR(10) NOT NULL, 
-    Tanggal_Pemeriksaan DATE NOT NULL,
-    Waktu_Pemeriksaan TIME NOT NULL,
-    Ruang_Pemeriksaan VARCHAR(50) NOT NULL,
-    FOREIGN KEY (ID_Pasien) REFERENCES PASIEN(ID_Pasien) ON DELETE CASCADE,
-    FOREIGN KEY (ID_Tenaga_Medis) REFERENCES TENAGA_MEDIS(ID_Tenaga_Medis)
+CREATE TABLE detail_tagihan (
+    id_tagihan VARCHAR(15),
+    id_layanan VARCHAR(10),
+    jumlah INT,
+    subtotal INT,
+    PRIMARY KEY (id_tagihan, id_layanan),
+    FOREIGN KEY (id_tagihan) REFERENCES tagihan(id_tagihan),
+    FOREIGN KEY (id_layanan) REFERENCES layanan(id_layanan)
 );
 
-CREATE TABLE DETAIL_PEMERIKSAAN (
-    ID_Layanan CHAR(10),
-    ID_Pemeriksaan CHAR(10),
-    Konsultasi VARCHAR (100) NOT NULL,
-    Suntik_Vitamin VARCHAR (100),
-    PRIMARY KEY (ID_Layanan, ID_Pemeriksaan),
-    FOREIGN KEY (ID_Layanan) REFERENCES LAYANAN(ID_Layanan),
-    FOREIGN KEY (ID_Pemeriksaan) REFERENCES PEMERIKSAAN(ID_Pemeriksaan) ON DELETE CASCADE
-);
-
-CREATE TABLE USERS (
+CREATE TABLE users (
     id_user SERIAL PRIMARY KEY,
-    username VARCHAR(50) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'dokter', 'pasien')),
-    id_pasien CHAR(10),
-    id_tenaga_medis CHAR(10),
-    FOREIGN KEY (id_pasien) REFERENCES PASIEN(ID_Pasien) ON DELETE CASCADE,
-    FOREIGN KEY (id_tenaga_medis) REFERENCES TENAGA_MEDIS(ID_Tenaga_Medis) ON DELETE CASCADE
+    username VARCHAR(50) UNIQUE,
+    password_hash TEXT,
+    role VARCHAR(20),
+    id_pasien VARCHAR(10),
+    id_tenaga_medis VARCHAR(10),
+    FOREIGN KEY (id_pasien) REFERENCES pasien(id_pasien),
+    FOREIGN KEY (id_tenaga_medis) REFERENCES tenaga_medis(id_tenaga_medis)
 );
 
--- 4. INSERT DATA DUMMY (HATI-HATI URUTANNYA)
-INSERT INTO DEPARTEMEN VALUES 
-('D001', 'Poli Umum'), ('D002', 'Poli Gigi'), ('D003', 'Bedah');
+-- =========================
+-- INSERT DUMMY DATA
+-- =========================
 
-INSERT INTO PASIEN VALUES 
-('P001', 'Budi Santoso', '1990-05-15', 'Jakarta', '081234567890'),
-('P002', 'Ani Wijaya', '1985-11-20', 'Bandung', '081234567891');
+INSERT INTO pasien VALUES
+('P001','Budi Santoso','1995-05-12','Jakarta','081234567890'),
+('P002','Ani Wijaya','1998-03-20','Bandung','082345678901');
 
-INSERT INTO LAYANAN VALUES 
-('L001', 'Konsultasi Dokter Umum', 150000),
-('L002', 'Tambal Gigi', 450000),
-('L005', 'Kamar Rawat Inap Kelas 1', 800000),
-('L006', 'Kamar VIP', 1500000);
+INSERT INTO departemen VALUES
+('D01','Poli Umum'),
+('D02','Rawat Inap');
 
-INSERT INTO RAWAT_JALAN VALUES 
-('P-UMUM', 'L001'), ('P-GIGI', 'L002');
+INSERT INTO tenaga_medis VALUES
+('TM01','Dr. Andi','D01'),
+('TM02','Perawat Sinta','D02');
 
-INSERT INTO TENAGA_MEDIS VALUES 
-('TM001', 'Dr. Anton', 'D001'), ('TM002', 'Dr. Bella', 'D002');
-INSERT INTO DOKTER VALUES 
-('TM001', 'Umum'), ('TM002', 'Gigi');
+INSERT INTO dokter VALUES
+('TM01','Dokter Umum');
 
-INSERT INTO USERS (username, password_hash, role, id_tenaga_medis) VALUES 
-('admin', 'admin123', 'admin', NULL),
-('dokter1', 'dokter123', 'dokter', 'TM001');
+INSERT INTO perawat VALUES
+('TM02','Pagi');
+
+INSERT INTO layanan VALUES
+('L001','Konsultasi Dokter',50000,'Rawat Jalan'),
+('L002','Suntik Vitamin',75000,'Rawat Jalan'),
+('L003','Kamar Inap Standar',250000,'Rawat Inap');
+
+INSERT INTO rekam_medis VALUES
+('RM001','P001','TM01','2025-12-19','Rawat Jalan','Flu','Istirahat'),
+('RM002','P002','TM01','2025-12-19','Rawat Jalan','Demam','Vitamin');
+
+-- PASSWORD = 123456 (bcrypt)
+INSERT INTO users (username,password_hash,role) VALUES
+('admin','$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','admin');
+
+INSERT INTO users (username,password_hash,role,id_tenaga_medis) VALUES
+('drandi','$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','dokter','TM01');
+
+INSERT INTO users (username,password_hash,role,id_pasien) VALUES
+('henry','$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','pasien','P003');

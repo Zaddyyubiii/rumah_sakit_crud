@@ -29,18 +29,26 @@ $stat_rm = $conn->prepare("SELECT COUNT(*) FROM REKAM_MEDIS WHERE ID_Pasien = ?"
 $stat_rm->execute([$id_pasien]);
 $stat_rm = $stat_rm->fetchColumn();
 
-$stat_periksa = $conn->prepare("SELECT COUNT(*) FROM PEMERIKSAAN WHERE ID_Pasien = ?");
+$stat_periksa = $conn->prepare("
+    SELECT COUNT(*) 
+    FROM PEMERIKSAAN p
+    JOIN REKAM_MEDIS rm ON p.ID_Rekam_Medis = rm.ID_Rekam_Medis
+    WHERE rm.ID_Pasien = ?
+");
 $stat_periksa->execute([$id_pasien]);
 $stat_periksa = $stat_periksa->fetchColumn();
 
+
 $stat_layanan = $conn->prepare("
-    SELECT COALESCE(COUNT(*),0) 
+SELECT COALESCE(COUNT(*),0)
     FROM DETAIL_PEMERIKSAAN dp
     JOIN PEMERIKSAAN p ON p.ID_Pemeriksaan = dp.ID_Pemeriksaan
-    WHERE p.ID_Pasien = ?
+    JOIN REKAM_MEDIS rm ON p.ID_Rekam_Medis = rm.ID_Rekam_Medis
+    WHERE rm.ID_Pasien = ?
 ");
 $stat_layanan->execute([$id_pasien]);
 $stat_layanan = $stat_layanan->fetchColumn();
+
 
 $stat_tagihan_aktif = $conn->prepare("
     SELECT COALESCE(SUM(Total_Biaya),0)
@@ -109,10 +117,12 @@ $sql_pem = "
            tm.Nama_Tenaga_Medis AS nama_dokter,
            COALESCE(COUNT(dp.ID_Layanan),0) AS jml_layanan
     FROM PEMERIKSAAN p
+    JOIN REKAM_MEDIS rm ON p.ID_Rekam_Medis = rm.ID_Rekam_Medis
     LEFT JOIN TENAGA_MEDIS tm ON p.ID_Tenaga_Medis = tm.ID_Tenaga_Medis
     LEFT JOIN DETAIL_PEMERIKSAAN dp ON p.ID_Pemeriksaan = dp.ID_Pemeriksaan
-    WHERE p.ID_Pasien = :id_pasien
+    WHERE rm.ID_Pasien = :id_pasien
 ";
+
 $params_pem = [':id_pasien' => $id_pasien];
 
 if ($keyword !== '') {
@@ -136,28 +146,37 @@ $data_pemeriksaan = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // DATA LAYANAN LANJUTAN
 // ==========================================================
 $sql_layanan = "
-    SELECT l.Nama_Layanan, dp.Konsultasi, dp.Suntik_Vitamin,
-           p.Tanggal_Pemeriksaan, p.Waktu_Pemeriksaan
+    SELECT
+        l.Nama_Layanan,
+        l.Jenis_Layanan,
+        l.Tarif_Dasar,
+        p.Tanggal_Pemeriksaan,
+        p.Waktu_Pemeriksaan
     FROM DETAIL_PEMERIKSAAN dp
-    JOIN LAYANAN l ON dp.ID_Layanan = l.ID_Layanan
     JOIN PEMERIKSAAN p ON dp.ID_Pemeriksaan = p.ID_Pemeriksaan
-    WHERE p.ID_Pasien = :id_pasien
+    JOIN REKAM_MEDIS rm ON p.ID_Rekam_Medis = rm.ID_Rekam_Medis
+    JOIN LAYANAN l ON dp.ID_Layanan = l.ID_Layanan
+    WHERE rm.ID_Pasien = :id_pasien
 ";
-$params_layanan = [':id_pasien' => $id_pasien];
+
+$params_layanan = ['id_pasien' => $id_pasien];
 
 if ($keyword !== '') {
     $sql_layanan .= " AND (
         l.Nama_Layanan ILIKE :kw
-        OR dp.Konsultasi ILIKE :kw
-        OR dp.Suntik_Vitamin ILIKE :kw
+        OR l.Jenis_Layanan ILIKE :kw
     )";
-    $params_layanan[':kw'] = $keywordSql;
+    $params_layanan['kw'] = "%$keyword%";
 }
-$sql_layanan .= " ORDER BY p.Tanggal_Pemeriksaan DESC, p.Waktu_Pemeriksaan DESC";
+
+$sql_layanan .= "
+    ORDER BY p.Tanggal_Pemeriksaan DESC, p.Waktu_Pemeriksaan DESC
+";
 
 $stmt = $conn->prepare($sql_layanan);
 $stmt->execute($params_layanan);
 $data_layanan = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
 
 // ==========================================================
 // DATA TAGIHAN PASIEN
@@ -449,8 +468,6 @@ if ($keyword !== '') {
                                 <tr>
                                     <th>Tanggal</th>
                                     <th>Dokter</th>
-                                    <th>Diagnosis</th>
-                                    <th>Hasil</th>
                                     <th>Status Rawat</th>
                                 </tr>
                             </thead>
@@ -462,8 +479,6 @@ if ($keyword !== '') {
                                         <tr>
                                             <td><?= date('d-m-Y', strtotime($r['tanggal_catatan'])) ?></td>
                                             <td><?= htmlspecialchars($r['nama_dokter'] ?: '-') ?></td>
-                                            <td><span class="text-danger"><?= htmlspecialchars($r['diagnosis']) ?></span></td>
-                                            <td><?= htmlspecialchars($r['hasil_pemeriksaan']) ?></td>
                                             <td>
     <?php
     // baca jenis_rawat dari REKAM_MEDIS
@@ -561,11 +576,10 @@ if ($keyword !== '') {
                         <table class="table mb-0">
                             <thead>
                                 <tr>
-                                    <th>Tanggal</th>
-                                    <th>Waktu</th>
                                     <th>Layanan</th>
-                                    <th>Konsultasi / Catatan</th>
-                                    <th>Suntik Vitamin</th>
+<th>Jenis</th>
+<th>Tarif</th>
+
                                 </tr>
                             </thead>
                             <tbody>
@@ -574,11 +588,13 @@ if ($keyword !== '') {
                                 <?php else: ?>
                                     <?php foreach($data_layanan as $l): ?>
                                         <tr>
-                                            <td><?= date('d-m-Y', strtotime($l['tanggal_pemeriksaan'])) ?></td>
-                                            <td><?= substr($l['waktu_pemeriksaan'], 0, 5) ?></td>
-                                            <td><?= htmlspecialchars($l['nama_layanan']) ?></td>
-                                            <td><?= htmlspecialchars($l['konsultasi']) ?></td>
-                                            <td><?= htmlspecialchars($l['suntik_vitamin'] ?: '-') ?></td>
+                                           <td><?= htmlspecialchars($l['nama_layanan']) ?></td>
+<td>
+    <span class="badge bg-info">
+        <?= htmlspecialchars($l['jenis_layanan']) ?>
+    </span>
+</td>
+<td>Rp <?= number_format($l['tarif_dasar'], 0, ',', '.') ?></td>
                                         </tr>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
